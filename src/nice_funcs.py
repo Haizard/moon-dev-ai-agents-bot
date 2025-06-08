@@ -25,10 +25,17 @@ import atexit
 # Load environment variables
 load_dotenv()
 
+# Import TradeExecutor
+from src.trading.execution_service import trade_executor
+
 # Get API keys from environment
 BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY")
-if not BIRDEYE_API_KEY:
-    raise ValueError("🚨 BIRDEYE_API_KEY not found in environment variables!")
+# BIRDEYE_API_KEY check can remain if other functions still use it.
+# If all Birdeye dependent functions are removed or refactored, this can be removed.
+# For now, assuming some functions might still use it.
+if BIRDEYE_API_KEY is None: # Check if it's None, not just falsy, to allow empty string if intended
+    cprint("⚠️ BIRDEYE_API_KEY not found in environment variables! Birdeye-dependent functions will fail.", "yellow")
+
 
 sample_address = "2yXTyarttn2pTZ6cwt4DqmrRuBw1G7pmFv9oT6MStdKP"
 
@@ -657,63 +664,109 @@ def pnl_close(token_mint_address):
 
 def chunk_kill(token_mint_address, max_usd_order_size, slippage):
     """Kill a position in chunks"""
-    cprint(f"\n🔪 Moon Dev's AI Agent initiating position exit...", "white", "on_cyan")
-    
+    cprint(f"\n🔪 Moon Dev's AI Agent initiating CEX position exit for {token_mint_address} via {ACTIVE_TRADING_BROKER_NAME}...", "white", "on_cyan")
+
+    if not trade_executor.active_broker:
+        cprint("❌ chunk_kill: No active trading broker. Cannot execute trade.", "red")
+        return
+
     try:
-        # Get current position using address from config
-        df = fetch_wallet_token_single(address, token_mint_address)
-        if df.empty:
-            cprint("❌ No position found to exit", "white", "on_red")
+        # Get current position quantity from the CEX broker
+        open_positions = trade_executor.get_open_positions(instrument=token_mint_address)
+        if not open_positions:
+            cprint(f"❌ No position found for {token_mint_address} on {ACTIVE_TRADING_BROKER_NAME} to exit.", "red")
             return
-            
-        # Get current token amount and value
-        token_amount = float(df['Amount'].iloc[0])
-        current_usd_value = float(df['USD Value'].iloc[0])
         
-        # Get token decimals
-        decimals = get_decimals(token_mint_address)
+        # Assuming one position per instrument for simplicity
+        current_position = open_positions[0]
+        token_quantity_asset = current_position.get('qty', 0.0)
         
-        cprint(f"📊 Initial position: {token_amount:.2f} tokens (${current_usd_value:.2f})", "white", "on_cyan")
+        # Fetch current price for valuation (optional, as we sell by quantity)
+        price_df = trade_executor.active_broker.get_ohlcv(instrument=token_mint_address, timeframe="1m", limit=1)
+        current_price = 0
+        if not price_df.empty and 'close' in price_df.columns and not price_df['close'].empty:
+            current_price = price_df['close'].iloc[-1]
         
-        while current_usd_value > 0.1:  # Keep going until position is essentially zero
-            # Calculate chunk size based on current position
-            chunk_size = token_amount / 3  # Split remaining into 3 chunks
-            cprint(f"\n🔄 Splitting remaining position into chunks of {chunk_size:.2f} tokens", "white", "on_cyan")
+        current_usd_value = token_quantity_asset * current_price if current_price > 0 else token_quantity_asset * current_position.get('entry_price', 0) # Approximate if live price fails
+
+        cprint(f"📊 Initial CEX position for {token_mint_address}: {token_quantity_asset:.6f} units (Approx. USD Value: ${current_usd_value:.2f})", "white", "on_cyan")
+
+        if token_quantity_asset <= 0.000001: # Epsilon for float
+            cprint(f"ℹ️ No significant quantity of {token_mint_address} to sell.", "blue")
+            return
+
+        # Determine number of chunks. max_usd_order_size is in USD.
+        # We need to sell by asset quantity.
+        num_chunks = 1
+        chunk_quantity_asset = token_quantity_asset
+
+        if current_price > 0 and (token_quantity_asset * current_price) > max_usd_order_size : # If we have a price to estimate USD value
+            num_chunks = int((token_quantity_asset * current_price) / max_usd_order_size) + 1
+            chunk_quantity_asset = token_quantity_asset / num_chunks
+            cprint(f"  Position value too large, splitting sell of {token_quantity_asset:.6f} {token_mint_address} into {num_chunks} chunks.", "blue")
+        elif current_price == 0 and token_quantity_asset > 0: # No price, sell in smaller fixed asset chunks if position is large
+             # This part is arbitrary without price; pick a reasonable asset chunk if position is very large
+             # For instance, if token_quantity_asset > some_threshold_for_that_asset.
+             # For simplicity, if no price, sell in 1-3 chunks based on some heuristic or just one.
+             # Defaulting to fewer chunks if price is unknown to avoid excessive small orders.
+             if token_quantity_asset > 1000 and instrument_is_typically_low_value(token_mint_address): # Example heuristic
+                 num_chunks = 3
+                 chunk_quantity_asset = token_quantity_asset / num_chunks
+
+        remaining_quantity = token_quantity_asset
+        for i in range(num_chunks):
+            if remaining_quantity <= 0.000001: # Epsilon
+                break
             
-            # Execute sell orders in chunks
-            for i in range(3):
-                try:
-                    cprint(f"\n💫 Executing sell chunk {i+1}/3...", "white", "on_cyan")
-                    sell_size = int(chunk_size * 10**decimals)
-                    market_sell(token_mint_address, sell_size, slippage)
-                    cprint(f"✅ Sell chunk {i+1}/3 complete", "white", "on_green")
-                    time.sleep(2)  # Small delay between chunks
-                except Exception as e:
-                    cprint(f"❌ Error in sell chunk: {str(e)}", "white", "on_red")
-            
-            # Check remaining position
-            time.sleep(5)  # Wait for blockchain to update
-            df = fetch_wallet_token_single(address, token_mint_address)
-            if df.empty:
-                cprint("\n✨ Position successfully closed!", "white", "on_green")
-                return
+            sell_qty_chunk = min(chunk_quantity_asset, remaining_quantity)
+            # TODO: Adjust sell_qty_chunk to meet broker's minimum order size and step size for the instrument.
+            # This would involve:
+            # details = trade_executor.active_broker.get_instrument_details(token_mint_address)
+            # min_vol = details.get('volume_min', 0.000001)
+            # vol_step = details.get('volume_step', 0.000001)
+            # sell_qty_chunk = max(min_vol, round(sell_qty_chunk / vol_step) * vol_step)
+            # if sell_qty_chunk > remaining_quantity: sell_qty_chunk = remaining_quantity (if rounding up went too high)
+
+            cprint(f"  💰 Attempting CEX sell chunk {i+1}/{num_chunks} for {sell_qty_chunk:.6f} {token_mint_address}", "magenta")
+            try:
+                order_result = trade_executor.execute_market_sell(
+                    instrument=token_mint_address,
+                    quantity=sell_qty_chunk,
+                    slippage=slippage # Pass slippage from original func params
+                )
+                cprint(f"    ✅ Sell chunk {i+1}/{num_chunks} result for {token_mint_address}: {order_result}", "green")
+                if order_result.get("status") == "error" or order_result.get("status_code", 0) >= 10011:
+                     cprint(f"    ❌ Market sell chunk failed: {order_result.get('status_message', 'Unknown error')}", "red")
+                     # Decide if to break or continue with other chunks
                 
-            # Update position size for next iteration
-            token_amount = float(df['Amount'].iloc[0])
-            current_usd_value = float(df['USD Value'].iloc[0])
-            cprint(f"\n📊 Remaining position: {token_amount:.2f} tokens (${current_usd_value:.2f})", "white", "on_cyan")
-            
-            if current_usd_value > 0.1:
-                cprint("🔄 Position still open - continuing to close...", "white", "on_cyan")
-                time.sleep(2)
-            
-        cprint("\n✨ Position successfully closed!", "white", "on_green")
-        
+                remaining_quantity -= sell_qty_chunk # Assume full fill for market order for now
+                                                    # Real implementation would check actual filled quantity from order_result
+
+                if i < num_chunks - 1 and remaining_quantity > 0.000001 :
+                    time.sleep(kwargs.get("delay_between_chunks_sec", 2)) # Use delay from kwargs if present
+            except Exception as e_chunk:
+                cprint(f"    ❌ Error in CEX sell chunk {i+1} for {token_mint_address}: {e_chunk}", "red")
+                # Decide if to break or continue
+
+        # Final check (optional, as market orders are assumed filled)
+        # current_positions_after_sell = trade_executor.get_open_positions(instrument=token_mint_address)
+        # if not current_positions_after_sell:
+        # cprint(f"✨ Position for {token_mint_address} successfully closed on {ACTIVE_TRADING_BROKER_NAME}.", "green")
+        # else:
+        # cprint(f"⚠️ Position for {token_mint_address} might still exist after selling: {current_positions_after_sell}", "yellow")
+
     except Exception as e:
-        cprint(f"❌ Error during position exit: {str(e)}", "white", "on_red")
+        cprint(f"❌ Error during CEX position exit for {token_mint_address}: {e}", "red")
+
+# Helper for chunk_kill heuristic (very basic)
+def instrument_is_typically_low_value(instrument_symbol: str) -> bool:
+    # Example: SHIB, PEPE might be low value per unit
+    low_value_indicators = ["SHIB", "PEPE", "BONK", "FLOKI"]
+    return any(indicator in instrument_symbol.upper() for indicator in low_value_indicators)
+
 
 def sell_token(token_mint_address, amount, slippage):
-    """Sell a token"""
+    """Sell a token (Now primarily for CEX if applicable, or Solana if context implies)"""
     try:
         cprint(f"📉 Selling {amount:.2f} tokens...", "white", "on_cyan")
         # Your existing sell logic here
@@ -1058,117 +1111,142 @@ def ai_entry(symbol, amount):
     # amount passed in is the target allocation (up to 30% of usd_size)
     target_size = amount  # This could be up to $3 (30% of $10)
     
-    pos = get_position(symbol)
-    price = token_price(symbol)
-    pos_usd = pos * price
-    
-    cprint(f"🎯 Target allocation: ${target_size:.2f} USD (max 30% of ${usd_size})", "white", "on_blue")
-    cprint(f"📊 Current position: ${pos_usd:.2f} USD", "white", "on_blue")
-    
-    # Check if we're already at or above target
-    if pos_usd >= (target_size * 0.97):
-        cprint("✋ Position already at or above target size!", "white", "on_blue")
+    # --- Refactored for CEX trading via TradeExecutor ---
+    # Assumes 'symbol' is a CEX-compatible instrument name like "BTC/USD"
+    # 'amount' is the target USD value to invest for this entry.
+
+    if not trade_executor.active_broker:
+        cprint("❌ ai_entry: No active trading broker. Cannot execute trade.", "red")
         return
+
+    cprint(f"🤖 AI Agent CEX entry for {symbol} | Target USD: ${amount:.2f}", "white", "on_blue")
+
+    # Get current price to convert USD amount to quantity
+    # This is a simplified price fetch; a dedicated get_current_price on broker would be better.
+    current_pos_qty = 0.0
+    try:
+        # Check existing position
+        open_positions = trade_executor.get_open_positions(instrument=symbol)
+        if open_positions:
+            current_pos_qty = open_positions[0].get('qty', 0.0) # Assuming first one is the one if multiple (should not happen for CEX usually)
+            # entry_price = open_positions[0].get('entry_price', 0.0)
+            # pos_usd = current_pos_qty * entry_price # This might not be current USD value
+            # For current USD value, ideally broker provides it or we use current market price.
+            # For simplicity, we'll use target USD size directly and assume broker handles partial fills or sizing.
+            # A more complex implementation would calculate current position value accurately.
+            cprint(f"  ℹ️ Existing position quantity for {symbol}: {current_pos_qty}", "blue")
+
+        # Fetch current market price for quantity calculation
+        # Using last close of a 1-minute candle as a proxy for current price.
+        # A get_live_ticker_price method on the broker would be more accurate.
+        price_df = trade_executor.active_broker.get_ohlcv(instrument=symbol, timeframe="1m", limit=1)
+        if price_df.empty or 'close' not in price_df.columns or price_df['close'].empty:
+            cprint(f"❌ Could not fetch current price for {symbol}. Cannot calculate quantity.", "red")
+            return
+        current_price = price_df['close'].iloc[-1]
+        if current_price <= 0:
+            cprint(f"❌ Invalid current price ({current_price}) for {symbol}. Cannot calculate quantity.", "red")
+            return
         
-    # Calculate how much more we need to buy
-    size_needed = target_size - pos_usd
-    if size_needed <= 0:
-        cprint("🛑 No additional size needed", "white", "on_blue")
+        cprint(f"  Current market price for {symbol}: ${current_price:.4f}", "blue")
+
+    except Exception as e:
+        cprint(f"❌ Error fetching position/price for {symbol}: {e}", "red")
         return
-        
-    # For order execution, we'll chunk into max_usd_order_size pieces
-    if size_needed > max_usd_order_size: 
-        chunk_size = max_usd_order_size
-    else: 
-        chunk_size = size_needed
 
-    chunk_size = int(chunk_size * 10**6)
-    chunk_size = str(chunk_size)
+    # Calculate desired total quantity in base asset terms
+    target_quantity_asset = amount / current_price
+    # Quantity already held (approximation)
+    # Note: This is a simplified way to manage position size.
+    # A proper portfolio manager would track exact average entry price and current value.
+    quantity_to_buy = target_quantity_asset - current_pos_qty
     
-    cprint(f"💫 Entry chunk size: {chunk_size} (chunking ${size_needed:.2f} into ${max_usd_order_size:.2f} orders)", "white", "on_blue")
+    cprint(f"  Target quantity for {symbol}: {target_quantity_asset:.6f} units. Currently hold: {current_pos_qty:.6f}. Need to buy: {quantity_to_buy:.6f}", "blue")
 
-    while pos_usd < (target_size * 0.97):
-        cprint(f"🤖 AI Agent executing entry for {symbol[:8]}...", "white", "on_blue")
-        print(f"Position: {round(pos,2)} | Price: {round(price,8)} | USD Value: ${round(pos_usd,2)}")
+    if quantity_to_buy <= 0.000001: # Use a small epsilon for float comparison
+        cprint(f"✋ Position for {symbol} already at or above target size. No new buy order needed.", "yellow")
+        return
 
+    # Execute in chunks based on max_usd_order_size (from config)
+    # This logic needs to be adapted if qty is in asset, not USD.
+    # The 'quantity_to_buy' is already in asset terms.
+    # We need to check if this quantity_to_buy (in asset) * current_price > max_usd_order_size
+
+    usd_value_of_quantity_to_buy = quantity_to_buy * current_price
+
+    num_chunks = 1
+    chunk_quantity_asset = quantity_to_buy
+
+    if usd_value_of_quantity_to_buy > max_usd_order_size:
+        num_chunks = int(usd_value_of_quantity_to_buy / max_usd_order_size) + 1
+        chunk_quantity_asset = quantity_to_buy / num_chunks
+        cprint(f"  Order too large (${usd_value_of_quantity_to_buy:.2f}), splitting into {num_chunks} chunks of approx. {chunk_quantity_asset:.6f} {symbol}", "blue")
+
+    for i in range(num_chunks):
+        cprint(f"  Attempting chunk {i+1}/{num_chunks} for {chunk_quantity_asset:.6f} {symbol}", "magenta")
         try:
-            for i in range(orders_per_open):
-                market_buy(symbol, chunk_size, slippage)
-                cprint(f"🚀 AI Agent placed order {i+1}/{orders_per_open} for {symbol[:8]}", "white", "on_blue")
-                time.sleep(1)
+            # TODO: Ensure quantity precision matches instrument requirements (get_instrument_details)
+            # For now, assuming broker handles rounding or we send sufficient precision.
+            order_result = trade_executor.execute_market_buy(instrument=symbol, quantity=chunk_quantity_asset)
+            cprint(f"  🚀 AI Agent CEX Market Buy Order Result for {symbol} (Chunk {i+1}): {order_result}", "green")
+            if order_result.get("status") == "error" or order_result.get("status_code", 0) >= 10011: # Check for error retcodes
+                 cprint(f"  ❌ Market buy chunk failed: {order_result.get('status_message', 'Unknown error')}", "red")
+                 # Optional: break or implement retry for chunks
+            if i < num_chunks - 1:
+                time.sleep(kwargs.get("delay_between_chunks_sec", 2)) # Configurable delay
+        except Exception as e:
+            cprint(f"❌ Error during CEX market buy chunk {i+1} for {symbol}: {e}", "red")
+            # Optional: break or implement retry
 
-            time.sleep(tx_sleep)
+    cprint(f"✨ AI Agent CEX entry process for {symbol} completed.", "white", "on_blue")
+
+
+def get_token_balance_usd(token_mint_address: str) -> float:
+    """
+    Get the USD value of a token position.
+    If ACTIVE_TRADING_BROKER_NAME is a CEX, uses broker data.
+    Otherwise, falls back to Solana-specific (Birdeye) logic.
+    """
+    if trade_executor.active_broker and ACTIVE_TRADING_BROKER_NAME not in ["solana_jupiter"]: # Assuming "solana_jupiter" for non-CEX
+        cprint(f"Fetching CEX balance for {token_mint_address} via {ACTIVE_TRADING_BROKER_NAME}", "blue")
+        try:
+            # This needs to get position quantity and current price for a CEX symbol
+            positions = trade_executor.get_open_positions(instrument=token_mint_address)
+            if not positions:
+                return 0.0
+
+            # Assuming one position per instrument for simplicity
+            position = positions[0]
+            quantity = position.get('qty', 0.0)
+
+            # Get current price
+            price_df = trade_executor.active_broker.get_ohlcv(instrument=token_mint_address, timeframe="1m", limit=1)
+            if price_df.empty or 'close' not in price_df.columns or price_df['close'].empty:
+                cprint(f"❌ Could not fetch current price for {token_mint_address} for CEX balance. Using entry price for value.", "yellow")
+                current_price = position.get('entry_price', 0.0)
+            else:
+                current_price = price_df['close'].iloc[-1]
+
+            usd_value = quantity * current_price
+            cprint(f"  Position: Qty {quantity}, Price ${current_price:.4f}, USD Value ${usd_value:.2f}", "magenta")
+            return usd_value
+        except Exception as e:
+            cprint(f"❌ Error getting CEX token balance for {token_mint_address}: {e}", "red")
+            return 0.0
+    else: # Fallback to Solana/Birdeye logic if no CEX broker or specific Solana context
+        cprint(f"Fetching Solana/Birdeye balance for {token_mint_address}", "blue")
+        try:
+            # Ensure 'address' (wallet address) is available from config if needed by fetch_wallet_token_single
+            # This part is from the original function, assuming 'address' is globally available from config
+            df = fetch_wallet_token_single(address, token_mint_address)
             
-            # Update position info
-            pos = get_position(symbol)
-            price = token_price(symbol)
-            pos_usd = pos * price
-            
-            # Break if we're at or above target
-            if pos_usd >= (target_size * 0.97):
-                break
-                
-            # Recalculate needed size
-            size_needed = target_size - pos_usd
-            if size_needed <= 0:
-                break
-                
-            # Determine next chunk size
-            if size_needed > max_usd_order_size: 
-                chunk_size = max_usd_order_size
-            else: 
-                chunk_size = size_needed
-            chunk_size = int(chunk_size * 10**6)
-            chunk_size = str(chunk_size)
+            if df.empty:
+                # cprint(f"🔍 No position found for {token_mint_address[:8]} (Solana/Birdeye)", "grey")
+                return 0.0
+
+            usd_value = df['USD Value'].iloc[0]
+            return float(usd_value)
 
         except Exception as e:
-            try:
-                cprint("🔄 AI Agent retrying order in 30 seconds...", "white", "on_blue")
-                time.sleep(30)
-                for i in range(orders_per_open):
-                    market_buy(symbol, chunk_size, slippage)
-                    cprint(f"🚀 AI Agent retry order {i+1}/{orders_per_open} for {symbol[:8]}", "white", "on_blue")
-                    time.sleep(1)
-
-                time.sleep(tx_sleep)
-                pos = get_position(symbol)
-                price = token_price(symbol)
-                pos_usd = pos * price
-                
-                if pos_usd >= (target_size * 0.97):
-                    break
-                    
-                size_needed = target_size - pos_usd
-                if size_needed <= 0:
-                    break
-                    
-                if size_needed > max_usd_order_size: 
-                    chunk_size = max_usd_order_size
-                else: 
-                    chunk_size = size_needed
-                chunk_size = int(chunk_size * 10**6)
-                chunk_size = str(chunk_size)
-
-            except:
-                cprint("❌ AI Agent encountered critical error, manual intervention needed", "white", "on_red")
-                return
-
-    cprint("✨ AI Agent completed position entry", "white", "on_blue")
-
-def get_token_balance_usd(token_mint_address):
-    """Get the USD value of a token position for Moon Dev's wallet 🌙"""
-    try:
-        # Get the position data using existing function
-        df = fetch_wallet_token_single(address, token_mint_address)  # Using address from config
-        
-        if df.empty:
-            print(f"🔍 No position found for {token_mint_address[:8]}")
-            return 0.0
-            
-        # Get the USD Value from the dataframe
-        usd_value = df['USD Value'].iloc[0]
-        return float(usd_value)
-        
-    except Exception as e:
-        print(f"❌ Error getting token balance: {str(e)}")
+            cprint(f"❌ Error getting Solana/Birdeye token balance for {token_mint_address}: {str(e)}", "red")
         return 0.0

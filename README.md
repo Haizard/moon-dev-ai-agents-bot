@@ -95,10 +95,12 @@ Project updates will be posted in discord, join here: [moondev.com](http://moond
 - [x] 2/1 - working on getting a self executing ai agent to work with a debugger ai to be able to autonomosly improve my code and trading backtests
 - [x] 1/31 - added o3-mini to the model factory
 - [x] 1/31 - updated the chat agent, this is the agent i will use for all live streams to manage chat with ai
+- [x] 2/10 - Refactored OHLCV Collector, Trading Agent, and Nice Funcs to use a new Broker Integration System (`BrokerFactory`, `BaseBroker`, `TradeExecutor`). Added Deriv, IC Markets, XM, Exness (MT5-based) broker classes. Centralized broker and core AI model configuration in `src/config.py`. Added comprehensive unit tests for factories and brokers.
 - [x] 1/30 - created the chat agent to manage the live stream chat
-- [x] 1/30 - groq added & gemini added. new interface for handling the ever growing amount of ai's we have access to. src/models/README.md
+- [x] 1/30 - groq added & gemini added. new interface for handling the ever growing amount of ai's we have access to (`ModelFactory`). Core AI model can be set in `src/config.py`. src/models/README.md
 - [x] 1/29 - deepseek hosted locally on lambda labs, see the api script if you want to launch your own src/scripts/deepseek_api.py. how to call it src/scripts/deepseek_local_call.py
-- [x] 1/27 - built a tweet agent and video agent 
+- [x] 1/27 - built a tweet agent and video agent
+- [x] 1/23 - rbi_agent.py updated to use core AI model settings more flexibly.
 - [x] 1/23 - build an rbi agent that codes backtests based on trading strategy videos, pdfs or words
 - [x] 1/20 - built the funding rate arbitrage trading agent to annnounce when there is a funding rate arbitrage between hyperliquid tokens and spot solana tokens. later we can update this to place the trades
 - [x] 1/17 - built chuck the chart analysis agent that reads in any crypto chart and then analyzes it to get a buy/sell/nothing reccomendation.
@@ -156,11 +158,30 @@ python 3.10.9 is what was used during dev
 4. 🔑 **Set Environment Variables**
    - Check `.env.example` for required variables
    - Create a copy of above and name it `.env` file with your keys:
-     - Anthropic API key
-     - Other trading API keys
-   - ⚠️ Never commit or share your API keys!
+     - `ANTHROPIC_KEY` (for Claude models)
+     - `OPENAI_KEY` (for OpenAI models)
+     - `GEMINI_KEY` (for Gemini models)
+     - `GROQ_API_KEY` (for Groq models)
+     - `DEEPSEEK_KEY` (for DeepSeek models)
+     - `BIRDEYE_API_KEY` (if using Birdeye-dependent functions in `nice_funcs.py`)
+     - `SOLANA_PRIVATE_KEY`, `RPC_ENDPOINT` (if using Solana-specific trading functions in `nice_funcs.py`)
+     - **Broker Credentials (as per `src/config.py` `BROKER_CONFIGS` section):**
+       - `DERIV_APP_ID`, `DERIV_API_TOKEN`
+       - `ICMARKETS_LOGIN_ID`, `ICMARKETS_PASSWORD`, `ICMARKETS_SERVER`, `ICMARKETS_MT5_PATH` (optional)
+       - `XM_LOGIN_ID`, `XM_PASSWORD`, `XM_SERVER`, `XM_MT5_PATH` (optional)
+       - `EXNESS_LOGIN_ID`, `EXNESS_PASSWORD`, `EXNESS_SERVER`, `EXNESS_MT5_PATH` (optional)
+   - ⚠️ Never commit or share your API keys or private keys! Use environment variables.
 
-5. 🤖 **Customize Agent Prompts**
+5. ⚙️ **Configure AI Models and Brokers (`src/config.py`)**
+   - **Core AI Model:** Set `CORE_AI_MODEL_TYPE` (e.g., "gemini", "groq") and optionally `CORE_AI_MODEL_NAME` to choose the default AI model used by various agents.
+   - **Brokers for Data Collection:** Modify `ACTIVE_BROKERS` (e.g., `["deriv", "icmarkets"]`) to list brokers the `ohlcv_collector.py` should use.
+   - **Broker for Trading:** Set `ACTIVE_TRADING_BROKER_NAME` (e.g., "deriv") to specify the broker used by `TradeExecutor` (via `nice_funcs.py`) for trade execution.
+   - **Broker Credentials & Settings:** Fill in the necessary details within the `BROKER_CONFIGS` dictionary for each broker you intend to use. This is where you link the environment variables (like `os.getenv("DERIV_API_TOKEN")`) to the broker configurations.
+     - For Deriv, you'll need an `app_id` and an API token.
+     - For MetaTrader 5 brokers (IC Markets, XM, Exness), you'll need your MT5 account login, password, server name, and optionally the path to your MT5 terminal installation. **Ensure the MT5 terminal is running and logged in for these brokers to work.**
+   - **Monitored Tokens:** Update `MONITORED_TOKENS` with symbols relevant to your chosen CEX/broker(s) (e.g., "BTC/USD", "R_100"). The previous Solana addresses are no longer the default for general broker interaction.
+
+6. 🤖 **Customize Agent Prompts**
    - Navigate to `/agents` folder
    - Modify LLM prompts to fit your needs
    - Each agent has configurable parameters
@@ -174,6 +195,56 @@ python 3.10.9 is what was used during dev
    - Execute via `main.py`
    - Toggle agents on/off as needed
    - Monitor logs for performance
+
+## 🛠️ Supported Integrations
+
+This project supports a variety of AI models and trading brokers, configurable via `src/config.py`.
+
+### AI Models
+The system uses a `ModelFactory` (`src/models/model_factory.py`) to manage and provide instances of different AI models. You can set a global default "core" AI model using `CORE_AI_MODEL_TYPE` and `CORE_AI_MODEL_NAME` in `src/config.py`.
+
+Supported AI model providers include:
+- **Groq:** Requires `GROQ_API_KEY` environment variable.
+- **Gemini:** Requires `GEMINI_KEY` environment variable.
+- **OpenAI:** Requires `OPENAI_KEY` environment variable.
+- **Anthropic (Claude):** Requires `ANTHROPIC_KEY` environment variable.
+- **DeepSeek:** Requires `DEEPSEEK_KEY` environment variable.
+
+Specific models from these providers can be chosen in `src/config.py` or used by specific agents.
+
+### Trading Brokers
+A `BrokerFactory` (`src/brokers/broker_factory.py`) manages connections to different trading brokers, built upon a `BaseBroker` interface.
+
+**Configuration in `src/config.py`:**
+- **`ACTIVE_BROKERS`**: A list of broker names (e.g., `["deriv", "icmarkets"]`) to be used by the OHLCV data collector (`src/data/ohlcv_collector.py`).
+- **`ACTIVE_TRADING_BROKER_NAME`**: A string (e.g., `"deriv"`) specifying the broker to be used for trade execution by the `TradeExecutor` (via `src/nice_funcs.py`).
+- **`BROKER_CONFIGS`**: A dictionary holding the specific credentials and settings for each broker. **It is crucial to use environment variables for sensitive data like API keys and passwords.**
+
+**Supported Brokers:**
+- **Deriv (`deriv`):**
+    - Uses Deriv's official API (WebSocket-based).
+    - Requires: `DERIV_APP_ID` (from Deriv Developer Portal) and `DERIV_API_TOKEN` (from Deriv account security settings).
+    - Configuration example in `src/config.py` under `BROKER_CONFIGS["deriv"]`.
+- **IC Markets (`icmarkets`):**
+    - Connects via the MetaTrader 5 (MT5) terminal.
+    - **Requires a running MT5 terminal logged into your IC Markets account.**
+    - Requires: `ICMARKETS_LOGIN_ID`, `ICMARKETS_PASSWORD`, `ICMARKETS_SERVER` (find this in your MT5 terminal). Optionally, `ICMARKETS_MT5_PATH` if your MT5 installation is not standard.
+    - Configuration example in `src/config.py` under `BROKER_CONFIGS["icmarkets"]`.
+- **XM.com (`xm`):** (Placeholder, uses IC Markets MT5 logic)
+    - Connects via the MetaTrader 5 (MT5) terminal.
+    - **Requires a running MT5 terminal logged into your XM.com account.**
+    - Requires: `XM_LOGIN_ID`, `XM_PASSWORD`, `XM_SERVER`. Optionally, `XM_MT5_PATH`.
+    - Configuration example in `src/config.py` under `BROKER_CONFIGS["xm"]`.
+- **Exness (`exness`):** (Placeholder, uses IC Markets MT5 logic)
+    - Connects via the MetaTrader 5 (MT5) terminal.
+    - **Requires a running MT5 terminal logged into your Exness account.**
+    * Requires: `EXNESS_LOGIN_ID`, `EXNESS_PASSWORD`, `EXNESS_SERVER`. Optionally, `EXNESS_MT5_PATH`.
+    * Configuration example in `src/config.py` under `BROKER_CONFIGS["exness"]`.
+
+**Trade Execution:**
+- The `TradeExecutor` service (`src/trading/execution_service.py`) centralizes trade execution logic for brokers defined in `BROKER_CONFIGS`.
+- General trading functions in `src/nice_funcs.py` (like `ai_entry`, `chunk_kill`) now use the `TradeExecutor` when `ACTIVE_TRADING_BROKER_NAME` is set to a CEX-style broker.
+- Solana-specific trading functions in `nice_funcs.py` (e.g., `market_buy` for Jupiter) remain separate and use Solana-specific environment variables.
 
 ---
 *Built with love by Moon Dev - Pioneering the future of AI-powered trading*

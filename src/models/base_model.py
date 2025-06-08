@@ -26,6 +26,7 @@ class BaseModel(ABC):
     def __init__(self, api_key: str, **kwargs):
         self.api_key = api_key
         self.client = None
+        self.max_tokens = kwargs.get('max_tokens', 2048)  # Default max_tokens for all models
         self.initialize_client(**kwargs)
     
     @abstractmethod

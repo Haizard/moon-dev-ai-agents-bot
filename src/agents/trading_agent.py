@@ -58,99 +58,120 @@ Remember:
 - Cash must be stored as USDC using USDC_ADDRESS: {USDC_ADDRESS}
 """
 
-import anthropic
+# import anthropic # Replaced by ModelFactory
 import os
 import pandas as pd
 import json
 from termcolor import colored, cprint
-from dotenv import load_dotenv
+# from dotenv import load_dotenv # ModelFactory handles .env loading
 from datetime import datetime, timedelta
 import time
 
 # Local imports
-from src.config import *
+# Specific imports from config to manage namespace and clarity
+from src.config import (
+    TRADING_PROMPT as BASE_TRADING_PROMPT,
+    ALLOCATION_PROMPT as BASE_ALLOCATION_PROMPT,
+    EXCLUDED_TOKENS, MONITORED_TOKENS, USDC_ADDRESS, AI_MODEL, # AI_MODEL is part of config for now
+    AI_MAX_TOKENS, AI_TEMPERATURE, usd_size, MAX_POSITION_PERCENTAGE, CASH_PERCENTAGE,
+    SLEEP_BETWEEN_RUNS_MINUTES, max_usd_order_size, slippage # Ensure all used config vars are listed
+)
 from src import nice_funcs as n
 from src.data.ohlcv_collector import collect_all_tokens
+from src.models.model_factory import model_factory # Import the singleton factory instance
 
-# Load environment variables
-load_dotenv()
+# Prepare prompts using variables from config
+# FORMATTED_ALLOCATION_PROMPT_SYSTEM is defined here using imported config vars
+FORMATTED_ALLOCATION_PROMPT_SYSTEM = BASE_ALLOCATION_PROMPT.format(
+    MAX_POSITION_PERCENTAGE=MAX_POSITION_PERCENTAGE,
+    CASH_PERCENTAGE=CASH_PERCENTAGE,
+    USDC_ADDRESS=USDC_ADDRESS
+)
+# BASE_TRADING_PROMPT (originally TRADING_PROMPT from config) will be formatted dynamically
+# in analyze_market_data where strategy_context is available.
 
 class TradingAgent:
     def __init__(self):
-        self.client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_KEY"))
+        cprint("🤖 Initializing Moon Dev's LLM Trading Agent...", "cyan")
+        self.ai_model = model_factory.get_core_model()
+        if not self.ai_model:
+            cprint("❌ CRITICAL: Core AI Model could not be initialized. Trading Agent cannot start.", "red")
+            raise RuntimeError("Failed to initialize core AI model for TradingAgent.")
+
         self.recommendations_df = pd.DataFrame(columns=['token', 'action', 'confidence', 'reasoning'])
-        print("🤖 Moon Dev's LLM Trading Agent initialized!")
+        cprint(f"✅ LLM Trading Agent initialized successfully with model: {self.ai_model.model_name} ({self.ai_model.model_type})", "green")
 
     def analyze_market_data(self, token, market_data):
-        """Analyze market data using Claude"""
-        try:
-            # Skip analysis for excluded tokens
-            if token in EXCLUDED_TOKENS:
-                print(f"⚠️ Skipping analysis for excluded token: {token}")
-                return None
-            
-            # Prepare strategy context
-            strategy_context = ""
-            if 'strategy_signals' in market_data:
-                strategy_context = f"""
-Strategy Signals Available:
-{json.dumps(market_data['strategy_signals'], indent=2)}
-                """
-            else:
-                strategy_context = "No strategy signals available."
-            
-            message = self.client.messages.create(
-                model=AI_MODEL,
-                max_tokens=AI_MAX_TOKENS,
-                temperature=AI_TEMPERATURE,
-                messages=[
-                    {
-                        "role": "user", 
-                        "content": f"{TRADING_PROMPT.format(strategy_context=strategy_context)}\n\nMarket Data to Analyze:\n{market_data}"
-                    }
-                ]
-            )
-            
-            # Parse the response - handle both string and list responses
-            response = message.content
-            if isinstance(response, list):
-                # Extract text from TextBlock objects if present
-                response = '\n'.join([
-                    item.text if hasattr(item, 'text') else str(item)
-                    for item in response
-                ])
-            
-            lines = response.split('\n')
-            action = lines[0].strip() if lines else "NOTHING"
-            
-            # Extract confidence from the response (assuming it's mentioned as a percentage)
-            confidence = 0
-            for line in lines:
-                if 'confidence' in line.lower():
-                    # Extract number from string like "Confidence: 75%"
-                    try:
-                        confidence = int(''.join(filter(str.isdigit, line)))
-                    except:
-                        confidence = 50  # Default if not found
-            
-            # Add to recommendations DataFrame with proper reasoning
-            reasoning = '\n'.join(lines[1:]) if len(lines) > 1 else "No detailed reasoning provided"
+        """Analyze market data using the configured core AI model"""
+        if not self.ai_model:
+            cprint(f"❌ AI model not available for analysis of {token}.", "red")
             self.recommendations_df = pd.concat([
                 self.recommendations_df,
-                pd.DataFrame([{
-                    'token': token,
-                    'action': action,
-                    'confidence': confidence,
-                    'reasoning': reasoning
-                }])
+                pd.DataFrame([{'token': token, 'action': "NOTHING", 'confidence': 0, 'reasoning': "AI model not available during analysis"}])
+            ], ignore_index=True)
+            return None
+        try:
+            if token in EXCLUDED_TOKENS:
+                cprint(f"⚠️ Skipping analysis for excluded token: {token}", "yellow")
+                return None
+            
+            strategy_context_str = ""
+            if 'strategy_signals' in market_data:
+                strategy_context_str = f"Strategy Signals Available:\n{json.dumps(market_data['strategy_signals'], indent=2)}"
+            else:
+                strategy_context_str = "No strategy signals available."
+
+            current_trading_prompt = BASE_TRADING_PROMPT.format(strategy_context=strategy_context_str)
+            # Ensure market_data is passed as a string, ideally JSON, for the prompt
+            user_prompt_content = f"Market Data to Analyze for {token}:\n{json.dumps(market_data, indent=2)}"
+
+            model_response = self.ai_model.generate_response(
+                system_prompt=current_trading_prompt,
+                user_content=user_prompt_content,
+                temperature=AI_TEMPERATURE, # From src.config
+                max_tokens=AI_MAX_TOKENS    # From src.config
+            )
+            
+            if not model_response or not model_response.content:
+                cprint(f"❌ Failed to get a valid response from AI model for {token}", "red")
+                self.recommendations_df = pd.concat([
+                    self.recommendations_df,
+                    pd.DataFrame([{'token': token, 'action': "NOTHING", 'confidence': 0, 'reasoning': "AI response error or empty content"}])
+                ], ignore_index=True)
+                return None
+
+            response_text = model_response.content.strip()
+            lines = response_text.split('\n')
+            action = lines[0].strip().upper() if lines else "NOTHING" # Ensure action is uppercase
+            
+            confidence = 0 # Default confidence
+            reasoning = '\n'.join(lines[1:]) if len(lines) > 1 else "No detailed reasoning provided"
+            
+            # More robust confidence extraction
+            for line in lines:
+                line_lower = line.lower()
+                if 'confidence level' in line_lower or 'confidence' in line_lower :
+                    try:
+                        # Attempt to extract digits before a '%' or from a general statement
+                        parts = line_lower.split(':')[-1].split('%')[0] # Handles "Confidence: 75%" or "Confidence level 75"
+                        confidence = int(''.join(filter(str.isdigit, parts)))
+                        if 0 <= confidence <= 100: # Validate confidence range
+                           break # Found valid confidence
+                        else:
+                           confidence = 50 # Default if out of range
+                    except ValueError:
+                        confidence = 50 # Default if parsing fails
+            
+            self.recommendations_df = pd.concat([
+                self.recommendations_df,
+                pd.DataFrame([{'token': token, 'action': action, 'confidence': confidence, 'reasoning': reasoning}])
             ], ignore_index=True)
             
-            print(f"🎯 Moon Dev's AI Analysis Complete for {token[:4]}!")
-            return response
+            cprint(f"🎯 AI Analysis Complete for {token[:4]}: Action: {action}, Confidence: {confidence}%", "green")
+            return response_text # Return the text content
             
         except Exception as e:
-            print(f"❌ Error in AI analysis: {str(e)}")
-            # Still add to DataFrame even on error, but mark as NOTHING with 0 confidence
+            cprint(f"❌ Error in AI analysis for {token}: {str(e)}", "red")
             self.recommendations_df = pd.concat([
                 self.recommendations_df,
                 pd.DataFrame([{
@@ -163,68 +184,114 @@ Strategy Signals Available:
             return None
     
     def allocate_portfolio(self):
-        """Get AI-recommended portfolio allocation"""
+        """Get AI-recommended portfolio allocation using the configured core AI model"""
+        if not self.ai_model:
+            cprint("❌ AI model not available for portfolio allocation.", "red")
+            return None
         try:
             cprint("\n💰 Calculating optimal portfolio allocation...", "cyan")
-            max_position_size = usd_size * (MAX_POSITION_PERCENTAGE / 100)
-            cprint(f"🎯 Maximum position size: ${max_position_size:.2f} ({MAX_POSITION_PERCENTAGE}% of ${usd_size:.2f})", "cyan")
-            
-            # Get allocation from AI
-            message = self.client.messages.create(
-                model=AI_MODEL,
-                max_tokens=AI_MAX_TOKENS,
+            max_position_value = usd_size * (MAX_POSITION_PERCENTAGE / 100) # Renamed for clarity
+            cprint(f"🎯 Maximum position value: ${max_position_value:.2f} ({MAX_POSITION_PERCENTAGE}% of ${usd_size:.2f})", "cyan")
+
+            # Filter recommendations for BUY signals and sort by confidence
+            buy_recommendations = self.recommendations_df[self.recommendations_df['action'] == 'BUY'].sort_values(by='confidence', ascending=False)
+
+            if buy_recommendations.empty:
+                cprint("ℹ️ No BUY recommendations available. Allocating all to USDC.", "blue")
+                allocations = {USDC_ADDRESS: usd_size}
+                cprint("\n📊 Portfolio Allocation:", "green")
+                for token, amount in allocations.items(): # Ensure this loop runs
+                    token_display = "USDC" if token == USDC_ADDRESS else token
+                    cprint(f"  • {token_display}: ${amount:.2f}", "green")
+                return allocations
+
+            # Construct user content with dynamic information
+            user_content_for_allocation = f"""
+Current Portfolio Context:
+- Total portfolio value (USD): {usd_size}
+- Maximum single position value (USD): {max_position_value}
+- Minimum cash buffer to maintain (USDC %): {CASH_PERCENTAGE}
+- Monitored token addresses for potential investment: {MONITORED_TOKENS}
+  (Note: Only consider tokens from the 'Trading Recommendations' below for actual allocation)
+- USDC Address for cash: {USDC_ADDRESS}
+
+Trading Recommendations (BUY signals only, sorted by confidence):
+{buy_recommendations.to_json(orient='records', indent=2)}
+
+Please provide the portfolio allocation based on these recommendations and the rules defined in the system prompt.
+Ensure the output is a valid JSON object.
+"""
+            model_response = self.ai_model.generate_response(
+                system_prompt=FORMATTED_ALLOCATION_PROMPT_SYSTEM, # Uses the module-level formatted system prompt
+                user_content=user_content_for_allocation,
                 temperature=AI_TEMPERATURE,
-                messages=[{
-                    "role": "user", 
-                    "content": f"""You are Moon Dev's Portfolio Allocation AI 🌙
-
-Given:
-- Total portfolio size: ${usd_size}
-- Maximum position size: ${max_position_size} ({MAX_POSITION_PERCENTAGE}% of total)
-- Minimum cash (USDC) buffer: {CASH_PERCENTAGE}%
-- Available tokens: {MONITORED_TOKENS}
-- USDC Address: {USDC_ADDRESS}
-
-Provide a portfolio allocation that:
-1. Never exceeds max position size per token
-2. Maintains minimum cash buffer
-3. Returns allocation as a JSON object with token addresses as keys and USD amounts as values
-4. Uses exact USDC address: {USDC_ADDRESS} for cash allocation
-
-Example format:
-{{
-    "token_address": amount_in_usd,
-    "{USDC_ADDRESS}": remaining_cash_amount  # Use exact USDC address
-}}"""
-                }]
+                max_tokens=AI_MAX_TOKENS
             )
+
+            if not model_response or not model_response.content:
+                cprint("❌ Failed to get a valid response from AI model for portfolio allocation.", "red")
+                return None
+
+            response_text = model_response.content.strip()
+            allocations = self.parse_allocation_response(response_text)
             
-            # Parse the response
-            allocations = self.parse_allocation_response(str(message.content))
             if not allocations:
+                cprint("❌ Could not parse allocations from AI response.", "red")
                 return None
+
+            # Ensure USDC_ADDRESS is correctly keyed if AI used a placeholder
+            for key in list(allocations.keys()): # Iterate over a copy of keys for safe modification
+                if "USDC" in key.upper() and key != USDC_ADDRESS: # Check if a key contains USDC but is not the exact address
+                    allocations[USDC_ADDRESS] = allocations.pop(key) # Standardize to the correct USDC_ADDRESS
+                    cprint(f"ℹ️ Corrected USDC key from '{key}' to '{USDC_ADDRESS}' during allocation parsing.", "blue")
+                    break
+
+            # Validate and adjust allocations
+            total_allocated_to_tokens = sum(v for k, v in allocations.items() if k != USDC_ADDRESS)
+
+            # Ensure USDC is present in allocations, calculate if missing
+            if USDC_ADDRESS not in allocations:
+                usdc_amount = max(0, usd_size - total_allocated_to_tokens) # Ensure USDC is not negative
+                allocations[USDC_ADDRESS] = usdc_amount
+                cprint(f"ℹ️ Adding missing USDC allocation: ${usdc_amount:.2f}", "blue")
+            else:
+                # If AI allocates more than portfolio size, adjust USDC
+                if total_allocated_to_tokens + allocations[USDC_ADDRESS] > usd_size:
+                     new_usdc_amount = max(0, usd_size - total_allocated_to_tokens)
+                     cprint(f"⚠️ AI allocated more than portfolio size. Original USDC: ${allocations[USDC_ADDRESS]:.2f}. Adjusted USDC to ${new_usdc_amount:.2f}", "yellow")
+                     allocations[USDC_ADDRESS] = new_usdc_amount
+
+            final_total_allocated = sum(allocations.values())
+            # Allow a small deviation (e.g., 1%) for float precision issues
+            if not (usd_size * 0.99 <= final_total_allocated <= usd_size * 1.01):
+                cprint(f"❌ Final total allocation ${final_total_allocated:.2f} significantly differs from portfolio size ${usd_size:.2f}. Normalizing token allocations.", "red")
                 
-            # Fix USDC address if needed
-            if "USDC_ADDRESS" in allocations:
-                amount = allocations.pop("USDC_ADDRESS")
-                allocations[USDC_ADDRESS] = amount
-                
-            # Validate allocation totals
-            total_allocated = sum(allocations.values())
-            if total_allocated > usd_size:
-                cprint(f"❌ Total allocation ${total_allocated:.2f} exceeds portfolio size ${usd_size:.2f}", "red")
-                return None
-                
-            # Print allocations
-            cprint("\n📊 Portfolio Allocation:", "green")
+                usdc_value = allocations.get(USDC_ADDRESS, 0)
+                target_token_sum = usd_size - usdc_value
+                current_token_sum = sum(v for k,v in allocations.items() if k != USDC_ADDRESS)
+
+                if current_token_sum > 0 and target_token_sum > 0: # Avoid division by zero and ensure target is positive
+                    scaling_factor = target_token_sum / current_token_sum
+                    for t_key in allocations:
+                        if t_key != USDC_ADDRESS:
+                            allocations[t_key] *= scaling_factor
+                # Recalculate USDC after scaling tokens to ensure it sums up correctly
+                allocations[USDC_ADDRESS] = usd_size - sum(v for k,v in allocations.items() if k != USDC_ADDRESS)
+
+
+            min_cash_needed = usd_size * (CASH_PERCENTAGE / 100)
+            if allocations.get(USDC_ADDRESS, 0) < min_cash_needed * 0.99: # Allow 1% leeway
+                cprint(f"⚠️ AI allocation for USDC (${allocations.get(USDC_ADDRESS, 0):.2f}) is below minimum cash buffer (${min_cash_needed:.2f}). This may require review.", "yellow")
+
+            cprint("\n📊 AI Recommended Portfolio Allocation (after validation & adjustments):", "green")
             for token, amount in allocations.items():
                 token_display = "USDC" if token == USDC_ADDRESS else token
                 cprint(f"  • {token_display}: ${amount:.2f}", "green")
-                
+
             return allocations
             
         except Exception as e:
-            cprint(f"❌ Error in portfolio allocation: {str(e)}", "red")
+            cprint(f"❌ Error in AI portfolio allocation: {str(e)}", "red")
             return None
 
     def execute_allocations(self, allocation_dict):

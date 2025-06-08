@@ -97,6 +97,7 @@ class GroqModel(BaseModel):
             cprint(f"  └─ ✅ Model name valid", "green")
             
             self.model_name = model_name
+            self.max_tokens = kwargs.get('max_tokens', 2048)  # Default max_tokens
             
             # Call parent class initialization
             cprint(f"\n📡 Parent class initialization...", "cyan")
@@ -192,7 +193,7 @@ class GroqModel(BaseModel):
                     {"role": "user", "content": f"{user_content}_{timestamp}"}  # Make each request unique
                 ],
                 temperature=temperature,
-                max_tokens=max_tokens if max_tokens else self.max_tokens,
+                max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
                 stream=False  # Disable streaming to prevent caching
             )
             

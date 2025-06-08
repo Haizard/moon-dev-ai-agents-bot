@@ -53,15 +53,62 @@ PACKAGE_CONFIG = {
     "name": "mixtral-8x7b-32768"  # Fast model for package optimization
 }
 
-# DeepSeek Model Selection per Agent
-# Options for each: 
-# - "deepseek-chat" (DeepSeek's V3 model - fast & efficient)
-# - "deepseek-reasoner" (DeepSeek's R1 reasoning model)
-# - "0" (Use config.py's AI_MODEL setting)
-RESEARCH_MODEL = "0"  # Analyzes strategies thoroughly
-BACKTEST_MODEL = "0"  # Creative in implementing strategies
-DEBUG_MODEL = "0"     # Careful code analysis
-PACKAGE_MODEL = "0"   # Optimizes package imports and dependencies
+# --- Apply Core Model Configuration ---
+# Import core model settings from global config
+from src.config import CORE_AI_MODEL_TYPE, CORE_AI_MODEL_NAME
+
+# List of task-specific configs to update
+RBI_TASK_CONFIGS = {
+    "RESEARCH": RESEARCH_CONFIG,
+    "BACKTEST": BACKTEST_CONFIG,
+    "DEBUG": DEBUG_CONFIG,
+    "PACKAGE": PACKAGE_CONFIG
+}
+
+# Determine effective model configurations for RBI tasks based on hierarchy.
+cprint(f"⚙️ Determining effective RBI model configurations...", "blue")
+for task_name, task_config_default in RBI_TASK_CONFIGS.items():
+    # Get the initial hardcoded config from rbi_agent.py
+    effective_config = task_config_default.copy() # Start with the agent's default
+
+    # Check if the task_config_default specifies a type.
+    # If not, it's a candidate for using the CORE_AI_MODEL.
+    if not effective_config.get("type"):
+        if CORE_AI_MODEL_TYPE and CORE_AI_MODEL_TYPE.strip():
+            cprint(f"  🔧 Task '{task_name}' has no explicit type; applying CORE_AI_MODEL: {CORE_AI_MODEL_TYPE}", "magenta")
+            effective_config["type"] = CORE_AI_MODEL_TYPE
+            effective_config["name"] = CORE_AI_MODEL_NAME if CORE_AI_MODEL_NAME and CORE_AI_MODEL_NAME.strip() else None
+        else:
+            # No explicit type in task_config AND no CORE_AI_MODEL_TYPE.
+            # This case means it will use its original hardcoded default if it had one,
+            # or it might be an issue if it was relying on a core model that isn't set.
+            # For safety, if type is still None, it might default to a very basic model or error later.
+            # The initial RESEARCH_CONFIG etc. already have defaults, so this path means they stick.
+            cprint(f"  ℹ️ Task '{task_name}' has no explicit type and no CORE_AI_MODEL defined. Using its original hardcoded defaults: {effective_config.get('type')}/{effective_config.get('name')}", "grey")
+    else:
+        cprint(f"  👍 Task '{task_name}' uses its explicit configuration: {effective_config.get('type')}/{effective_config.get('name')}", "blue")
+
+    # Adjust "reasoning_effort" based on the *effective* type and name
+    current_type = effective_config.get("type")
+    current_name = effective_config.get("name") # Could be None if factory default is intended
+
+    if current_type == "openai" and current_name and current_name.startswith('o3'):
+        if "reasoning_effort" not in effective_config:
+            effective_config["reasoning_effort"] = "medium" # Default for O3 if not specified
+            cprint(f"    ✨ Added default 'reasoning_effort: medium' for {task_name} ({current_name})", "grey")
+    elif "reasoning_effort" in effective_config and current_type != "openai":
+        del effective_config["reasoning_effort"] # Remove if not an OpenAI model
+        cprint(f"    🗑️ Removed 'reasoning_effort' for {task_name} as it's not an OpenAI model ({current_type})", "grey")
+
+    # Update the global config dicts (RESEARCH_CONFIG, etc.) with the determined effective_config
+    # This is a bit indirect but necessary as the rest of the script uses these global dicts.
+    if task_name == "RESEARCH": RESEARCH_CONFIG.clear(); RESEARCH_CONFIG.update(effective_config)
+    elif task_name == "BACKTEST": BACKTEST_CONFIG.clear(); BACKTEST_CONFIG.update(effective_config)
+    elif task_name == "DEBUG": DEBUG_CONFIG.clear(); DEBUG_CONFIG.update(effective_config)
+    elif task_name == "PACKAGE": PACKAGE_CONFIG.clear(); PACKAGE_CONFIG.update(effective_config)
+
+# Logging of final configurations will happen in the __main__ block.
+# --- End Core Model Configuration Logic ---
 
 # Agent Prompts
 
@@ -237,10 +284,6 @@ Example conversions:
 IMPORTANT: Scan the ENTIRE code for any backtesting.lib usage and replace ALL instances!
 Return the complete fixed code with proper Moon Dev themed debug prints! 🌙 ✨
 """
-
-def get_model_id(model):
-    """Get DR/DC identifier based on model"""
-    return "DR" if model == "deepseek-reasoner" else "DC"
 
 import os
 import time
@@ -722,11 +765,16 @@ def main():
 if __name__ == "__main__":
     try:
         cprint(f"\n🌟 Moon Dev's RBI Agent Starting Up!", "green")
-        cprint("\n🤖 Model Configurations:", "cyan")
-        cprint(f"📚 Research: {RESEARCH_CONFIG['type']} - {RESEARCH_CONFIG['name']}", "cyan")
-        cprint(f"📊 Backtest: {BACKTEST_CONFIG['type']} - {BACKTEST_CONFIG['name']}", "cyan")
-        cprint(f"🔧 Debug: {DEBUG_CONFIG['type']} - {DEBUG_CONFIG['name']}", "cyan")
-        cprint(f"📦 Package: {PACKAGE_CONFIG['type']} - {PACKAGE_CONFIG['name']}", "cyan")
+
+        # Display final effective model configurations
+        cprint("\n🤖 Effective RBI Model Configurations after applying core defaults:", "cyan")
+        for task_name, task_config in RBI_TASK_CONFIGS.items():
+            model_name_display = task_config['name'] if task_config.get('name') else "Default for type"
+            config_details = f"Type: {task_config['type']}, Name: {model_name_display}"
+            if "reasoning_effort" in task_config: # Also display reasoning_effort if present
+                config_details += f", Reasoning: {task_config['reasoning_effort']}"
+            cprint(f"  💡 {task_name + ':':<10} {config_details}", "cyan")
+
         main()
     except KeyboardInterrupt:
         cprint("\n👋 Moon Dev's RBI Agent shutting down gracefully...", "yellow")

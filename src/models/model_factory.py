@@ -16,7 +16,7 @@ from .groq_model import GroqModel
 from .openai_model import OpenAIModel
 from .gemini_model import GeminiModel
 from .deepseek_model import DeepSeekModel
-import random
+from src import config # Import the config module
 
 class ModelFactory:
     """Factory for creating and managing AI models"""
@@ -48,7 +48,20 @@ class ModelFactory:
         cprint(f"\n🔍 Loading environment from: {env_path}", "cyan")
         load_dotenv(dotenv_path=env_path)
         cprint("✨ Environment loaded", "green")
-        
+
+        # Load core model configuration
+        self.core_model_type = getattr(config, 'CORE_AI_MODEL_TYPE', None)
+        self.core_model_name = getattr(config, 'CORE_AI_MODEL_NAME', None) # Can be empty or None
+
+        if self.core_model_type:
+            cprint(f"⚙️ Configured Core AI Model Type: {self.core_model_type}", "blue")
+            if self.core_model_name:
+                cprint(f"⚙️ Configured Core AI Model Name: {self.core_model_name}", "blue")
+            else:
+                cprint(f"⚙️ Configured Core AI Model Name: Using default for {self.core_model_type}", "blue")
+        else:
+            cprint("⚠️ CORE_AI_MODEL_TYPE not configured in src/config.py. `get_core_model()` will not work.", "yellow")
+
         self._models: Dict[str, BaseModel] = {}
         self._initialize_models()
     
@@ -195,29 +208,31 @@ class ModelFactory:
         """Check if a specific model type is available"""
         return model_type in self._models and self._models[model_type].is_available()
 
-    def generate_response(self, system_prompt, user_content, temperature=0.7, max_tokens=None):
-        """Generate a response from the model with no caching"""
-        try:
-            # Add random nonce to prevent caching
-            nonce = f"_{random.randint(1, 1000000)}"
-            
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"{user_content}{nonce}"}  # Add nonce to force new response
-                ],
-                temperature=temperature,
-                max_tokens=max_tokens if max_tokens else self.max_tokens
-            )
-            
-            return response.choices[0].message
-            
-        except Exception as e:
-            if "503" in str(e):
-                raise e  # Let the retry logic handle 503s
-            cprint(f"❌ Model error: {str(e)}", "red")
+    def get_core_model(self) -> Optional[BaseModel]:
+        """
+        Retrieves the configured core AI model instance.
+        The core model is defined by CORE_AI_MODEL_TYPE and CORE_AI_MODEL_NAME in src/config.py.
+        """
+        cprint(f"\n🔍 Requesting core AI model...", "cyan")
+        if not self.core_model_type:
+            cprint("❌ CORE_AI_MODEL_TYPE not configured in src/config.py. Cannot retrieve core model.", "red")
             return None
+
+        # Use self.core_model_name directly. If it's an empty string or None,
+        # get_model will use the default for the type.
+        model_name_to_request = self.core_model_name if self.core_model_name else None
+
+        cprint(f"  ├─ Type: {self.core_model_type}", "cyan")
+        cprint(f"  └─ Name: {model_name_to_request or 'default'}", "cyan")
+
+        core_model = self.get_model(self.core_model_type, model_name_to_request)
+
+        if not core_model:
+            cprint(f"❌ Failed to retrieve core model (Type: {self.core_model_type}, Name: {model_name_to_request or 'default'})", "red")
+            return None
+
+        cprint(f"✅ Core model '{core_model.model_name}' of type '{self.core_model_type}' retrieved.", "green")
+        return core_model
 
 # Create a singleton instance
 model_factory = ModelFactory() 
