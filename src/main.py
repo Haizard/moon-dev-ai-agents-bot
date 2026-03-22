@@ -20,24 +20,25 @@ from src.agents.trading_agent import TradingAgent
 from src.agents.risk_agent import RiskAgent
 from src.agents.strategy_agent import StrategyAgent
 from src.agents.copybot_agent import CopyBotAgent
-from src.agents.sentiment_agent import SentimentAgent
 
 # Load environment variables
 load_dotenv()
 
 # Agent Configuration
 ACTIVE_AGENTS = {
-    'risk': False,      # Risk management agent
-    'trading': False,   # LLM trading agent
-    'strategy': False,  # Strategy-based trading agent
+    'risk': True,      # Risk management agent
+    'trading': True,   # LLM trading agent
+    'strategy': True,  # Strategy-based trading agent
     'copybot': False,   # CopyBot agent
-    'sentiment': False, # Run sentiment_agent.py directly instead
+    'sentiment': True, # Run sentiment_agent.py directly instead
     # whale_agent is run from whale_agent.py
     # Add more agents here as we build them:
     # 'portfolio': False,  # Future portfolio optimization agent
 }
 
-def run_agents():
+import asyncio
+
+async def run_agents():
     """Run all active agents in sequence"""
     try:
         # Initialize active agents
@@ -45,7 +46,11 @@ def run_agents():
         risk_agent = RiskAgent() if ACTIVE_AGENTS['risk'] else None
         strategy_agent = StrategyAgent() if ACTIVE_AGENTS['strategy'] else None
         copybot_agent = CopyBotAgent() if ACTIVE_AGENTS['copybot'] else None
-        sentiment_agent = SentimentAgent() if ACTIVE_AGENTS['sentiment'] else None
+        if ACTIVE_AGENTS['sentiment']:
+            from src.agents.sentiment_agent import SentimentAgent
+            sentiment_agent = SentimentAgent()
+        else:
+            sentiment_agent = None
 
         while True:
             try:
@@ -54,18 +59,23 @@ def run_agents():
                     cprint("\n🛡️ Running Risk Management...", "cyan")
                     risk_agent.run()
 
-                # Run Trading Analysis
-                if trading_agent:
-                    cprint("\n🤖 Running Trading Analysis...", "cyan")
-                    trading_agent.run()
-
-                # Run Strategy Analysis
+                # Run Strategy Analysis (Async)
+                strategy_signals = {}
                 if strategy_agent:
                     cprint("\n📊 Running Strategy Analysis...", "cyan")
                     for token in MONITORED_TOKENS:
-                        if token not in EXCLUDED_TOKENS:  # Skip USDC and other excluded tokens
+                        if token not in EXCLUDED_TOKENS:
                             cprint(f"\n🔍 Analyzing {token}...", "cyan")
-                            strategy_agent.get_signals(token)
+                            signals = await strategy_agent.get_signals(token)
+                            if signals:
+                                strategy_signals[token] = signals
+
+                # Run Trading Analysis
+                if trading_agent:
+                    cprint("\n🤖 Running Trading Analysis...", "cyan")
+                    # TradingAgent.run() calls run_trading_cycle
+                    # We can pass strategy_signals if needed
+                    trading_agent.run_trading_cycle(strategy_signals=strategy_signals)
 
                 # Run CopyBot Analysis
                 if copybot_agent:
@@ -75,17 +85,17 @@ def run_agents():
                 # Run Sentiment Analysis
                 if sentiment_agent:
                     cprint("\n🎭 Running Sentiment Analysis...", "cyan")
-                    sentiment_agent.run()
+                    await sentiment_agent.run_async()
 
                 # Sleep until next cycle
                 next_run = datetime.now() + timedelta(minutes=SLEEP_BETWEEN_RUNS_MINUTES)
                 cprint(f"\n😴 Sleeping until {next_run.strftime('%H:%M:%S')}", "cyan")
-                time.sleep(60 * SLEEP_BETWEEN_RUNS_MINUTES)
+                await asyncio.sleep(60 * SLEEP_BETWEEN_RUNS_MINUTES)
 
             except Exception as e:
                 cprint(f"\n❌ Error running agents: {str(e)}", "red")
                 cprint("🔄 Continuing to next cycle...", "yellow")
-                time.sleep(60)  # Sleep for 1 minute on error before retrying
+                await asyncio.sleep(60)
 
     except KeyboardInterrupt:
         cprint("\n👋 Gracefully shutting down...", "yellow")
@@ -101,4 +111,4 @@ if __name__ == "__main__":
         cprint(f"  • {agent.title()}: {status}", "white", "on_blue")
     print("\n")
 
-    run_agents()
+    asyncio.run(run_agents())

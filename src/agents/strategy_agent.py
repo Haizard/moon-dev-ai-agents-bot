@@ -12,17 +12,22 @@ import importlib
 import inspect
 import time
 from src import nice_funcs as n
+from src.agents.research_agent import ResearchAgent
+import asyncio
 
 # 🎯 Strategy Evaluation Prompt
 STRATEGY_EVAL_PROMPT = """
-You are Moon Dev's Strategy Validation Assistant 🌙
+You are Moon Dev's Advanced Strategy Analyst 🌙
 
-Analyze the following strategy signals and validate their recommendations:
+Analyze the following strategy signals alongside deep market microstructure research:
+
+Research Report (High Precision):
+{research_data}
 
 Strategy Signals:
 {strategy_signals}
 
-Market Context:
+Market Context (OHLCV):
 {market_data}
 
 Your task:
@@ -51,6 +56,7 @@ class StrategyAgent:
         """Initialize the Strategy Agent"""
         self.enabled_strategies = []
         self.client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_KEY"))
+        self.research_agent = ResearchAgent()
         
         if ENABLE_STRATEGIES:
             try:
@@ -91,8 +97,9 @@ class StrategyAgent:
                 messages=[{
                     "role": "user",
                     "content": STRATEGY_EVAL_PROMPT.format(
+                        research_data=market_data.get('research_report', 'No research available'),
                         strategy_signals=signals_str,
-                        market_data=market_data
+                        market_data=market_data.get('ohlcv', 'No OHLCV available')
                     )
                 }]
             )
@@ -119,7 +126,7 @@ class StrategyAgent:
             print(f"❌ Error evaluating signals: {e}")
             return None
 
-    def get_signals(self, token):
+    async def get_signals(self, token):
         """Get and evaluate signals from all enabled strategies"""
         try:
             # 1. Collect signals from all strategies
@@ -146,12 +153,25 @@ class StrategyAgent:
                 print(f"  • {signal['strategy_name']}: {signal['direction']} ({signal['signal']}) for {signal['token']}")
             
             # 2. Get market data for context
+            # A. OHLCV (legacy context)
             try:
                 from src.data.ohlcv_collector import collect_token_data
-                market_data = collect_token_data(token)
+                ohlcv_data = collect_token_data(token)
             except Exception as e:
-                print(f"⚠️ Could not get market data: {e}")
-                market_data = {}
+                print(f"⚠️ Could not get OHLCV data: {e}")
+                ohlcv_data = {}
+
+            # B. Deep Microstructure Research (New High-Precision Context)
+            try:
+                research_report = await self.research_agent.get_market_health(token)
+            except Exception as e:
+                print(f"⚠️ Could not get research report: {e}")
+                research_report = {}
+
+            market_data = {
+                "ohlcv": ohlcv_data,
+                "research_report": research_report
+            }
             
             # 3. Have LLM evaluate the signals
             print("\n🤖 Getting LLM evaluation of signals...")

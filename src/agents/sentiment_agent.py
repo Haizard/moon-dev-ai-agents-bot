@@ -12,21 +12,20 @@ Required:
 '''
 
 # Configuration
-TOKENS_TO_TRACK = ["solana", "bitcoin", "ethereum"]  # Add tokens you want to track
-TWEETS_PER_RUN = 30  # Number of tweets to collect per run
-DATA_FOLDER = "src/data/sentiment"  # Where to store sentiment data
-SENTIMENT_HISTORY_FILE = "src/data/sentiment_history.csv"  # Store sentiment scores over time
+TOKENS_TO_TRACK = ["solana", "bitcoin", "ethereum"]
+TWEETS_PER_RUN = 30
+DATA_FOLDER = "src/data/sentiment"
+SENTIMENT_HISTORY_FILE = "src/data/sentiment_history.csv"
 IGNORE_LIST = ['t.co', 'discord', 'join', 'telegram', 'discount', 'pay']
-CHECK_INTERVAL_MINUTES = 15  # How often to run sentiment analysis
+CHECK_INTERVAL_MINUTES = 15
+SENTIMENT_ANNOUNCE_THRESHOLD = 0.4
 
-# Sentiment settings
-SENTIMENT_ANNOUNCE_THRESHOLD = 0.4  # Announce vocally if abs(sentiment) > this value (-1 to 1 scale)
+# Voice Settings
+VOICE_MODEL = "tts-1"
+VOICE_NAME = "nova"
+VOICE_SPEED = 1
 
-# Voice settings (copied from whale agent)
-VOICE_MODEL = "tts-1"  # or tts-1-hd for higher quality
-VOICE_NAME = "nova"   # Options: alloy, echo, fable, onyx, nova, shimmer
-VOICE_SPEED = 1      # 0.25 to 4.0
-
+import pandas as pd
 import httpx
 from dotenv import load_dotenv
 import os
@@ -38,12 +37,12 @@ import csv
 from random import randint
 import pathlib
 import asyncio
-import pandas as pd
-import torch
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import numpy as np
 import openai
 from pathlib import Path
+
+# --- Lazy Imports for AI & Twitter ---
+# torch, transformers, and twikit are only imported when needed
 
 # Create data directory if it doesn't exist
 pathlib.Path(DATA_FOLDER).mkdir(parents=True, exist_ok=True)
@@ -92,7 +91,8 @@ def patched_client(*args, **kwargs):
 httpx.Client = patched_client
 
 # imports 
-from twikit import Client, TooManyRequests, BadRequest
+# --- Lazy Imports for Twitter ---
+# twikit is only imported when needed in initialize_twitter_client()
 
 class SentimentAgent:
     def __init__(self):
@@ -100,32 +100,54 @@ class SentimentAgent:
         self.client = None
         self.tokenizer = None
         self.model = None
+        self.twikit_client = None # NEW: correctly initialize attribute
         self.audio_dir = Path("src/audio")
         self.audio_dir.mkdir(parents=True, exist_ok=True)
         
         # Initialize sentiment history file
-        if not os.path.exists(SENTIMENT_HISTORY_FILE):
-            pd.DataFrame(columns=['timestamp', 'sentiment_score', 'num_tweets']).to_csv(SENTIMENT_HISTORY_FILE, index=False)
+        try:
+            import pandas as pd
+            if not os.path.exists(SENTIMENT_HISTORY_FILE):
+                pd.DataFrame(columns=['timestamp', 'sentiment_score', 'num_tweets']).to_csv(SENTIMENT_HISTORY_FILE, index=False)
+        except ImportError:
+            cprint("⚠️ pandas not found! Sentiment history will be limited.", "yellow")
         
-        # Load the sentiment model at initialization
-        cprint("🤖 Loading sentiment model...", "cyan")
+        # Load the sentiment model at initialization (Lazy Load handled inside)
         self.init_sentiment_model()
             
         cprint("🌙 Moon Dev's Sentiment Agent initialized!", "green")
         
     def init_sentiment_model(self):
-        """Initialize the BERT model for sentiment analysis"""
+        """Initialize the BERT model (Lazy Load)"""
         if self.model is None:
-            self.tokenizer = AutoTokenizer.from_pretrained("finiteautomata/bertweet-base-sentiment-analysis")
-            self.model = AutoModelForSequenceClassification.from_pretrained("finiteautomata/bertweet-base-sentiment-analysis")
-            cprint("✨ Sentiment model loaded!", "green")
+            try:
+                import torch
+                from transformers import AutoTokenizer, AutoModelForSequenceClassification
+                
+                cprint("🤖 Loading sentiment model...", "cyan")
+                self.tokenizer = AutoTokenizer.from_pretrained("finiteautomata/bertweet-base-sentiment-analysis")
+                self.model = AutoModelForSequenceClassification.from_pretrained("finiteautomata/bertweet-base-sentiment-analysis")
+                cprint("✨ Sentiment model loaded!", "green")
+            except ImportError:
+                cprint("⚠️ torch or transformers not found! Sentiment analysis will be disabled.", "yellow")
+                cprint("📝 To fix, run: pip install torch transformers", "yellow")
+                self.model = "DISABLED"
+            except Exception as e:
+                cprint(f"❌ Error loading sentiment model: {str(e)}", "red")
+                self.model = "DISABLED"
 
     def analyze_sentiment(self, texts):
         """Analyze sentiment of a batch of texts"""
+        if self.model == "DISABLED":
+            return 0.0 # Neutral score if model is not available
+            
         self.init_sentiment_model()
+        if self.model == "DISABLED":
+            return 0.0
         
+        import torch # Explicit import for method use
         sentiments = []
-        batch_size = 8  # Process in small batches to avoid memory issues
+        batch_size = 8
         
         for i in range(0, len(texts), batch_size):
             batch_texts = texts[i:i + batch_size]
@@ -309,26 +331,26 @@ class SentimentAgent:
         if not is_important:
             cprint(f"📊 Raw sentiment score: {sentiment_score:.2f} (on scale of -1 to 1)", "cyan")
 
-    def init_twitter_client(self):
-        """Initialize Twitter client using saved cookies"""
+    async def init_twitter_client(self):
+        """Initialize Twitter client using saved cookies (Lazy Load)"""
         try:
+            from twikit import EdgeAsyncClient as Client
             if not os.path.exists("cookies.json"):
                 cprint("❌ No cookies.json found! Please run twitter_login.py first", "red")
-                sys.exit(1)
+                return None
 
             cprint("🌙 Moon Dev's Sentiment Agent starting up...", "cyan")
             client = Client()
-            client.load_cookies("cookies.json")
+            await client.load_cookies("cookies.json")
             cprint("🚀 Moon Dev's cookies loaded successfully! Time to fly to the moon! 🌙", "green")
             return client
 
+        except ImportError:
+            cprint("⚠️ twikit not found! Twitter sentiment analysis will be disabled.", "yellow")
+            return None
         except Exception as e:
             cprint(f"❌ Error initializing client: {str(e)}", "red")
-            if os.path.exists("cookies.json"):
-                os.remove("cookies.json")
-                cprint("🗑️ Removed invalid cookies file", "yellow")
-                cprint("🔄 Please run twitter_login.py again", "yellow")
-            sys.exit(1)
+            return None
 
     async def get_tweets(self, query):
         """Get tweets with proper error handling"""
@@ -341,6 +363,9 @@ class SentimentAgent:
             time.sleep(randint(1, 3))
             
             # Get tweets using search
+            if not self.client:
+                return []
+                
             tweets = await self.client.search_tweet(query, product='Latest')
             
             if tweets:
@@ -373,24 +398,31 @@ class SentimentAgent:
                 except Exception as e:
                     cprint(f"ℹ️ Stopped pagination: {str(e)}", "yellow")
 
-        except TooManyRequests as e:
-            rate_limit_reset = datetime.fromtimestamp(e.rate_limit_reset)
-            wait_time = (rate_limit_reset - datetime.now()).total_seconds() + randint(5, 10)
-            cprint(f'⏰ Rate limit hit, waiting {wait_time} seconds...', "yellow")
-            time.sleep(wait_time)
-            # Try one more time after waiting
-            try:
-                tweets = await self.client.search_tweet(query, product='Latest')
-                if tweets:
-                    for tweet in tweets:
-                        if len(collected_tweets) >= TWEETS_PER_RUN:
-                            break
-                        if not any(word.lower() in tweet.text.lower() for word in IGNORE_LIST):
-                            collected_tweets.append(tweet)
-                            cprint(f"📝 Found tweet: {tweet.text[:100]}...", "cyan")
-            except Exception as e:
-                cprint(f"❌ Second attempt failed: {str(e)}", "red")
         except Exception as e:
+            # Handle twikit specific errors if twikit is available
+            try:
+                from twikit import TooManyRequests
+                if isinstance(e, TooManyRequests):
+                    rate_limit_reset = datetime.fromtimestamp(e.rate_limit_reset)
+                    wait_time = (rate_limit_reset - datetime.now()).total_seconds() + randint(5, 10)
+                    cprint(f'⏰ Rate limit hit, waiting {wait_time} seconds...', "yellow")
+                    time.sleep(wait_time)
+                    # Try one more time after waiting
+                    try:
+                        tweets = await self.client.search_tweet(query, product='Latest')
+                        if tweets:
+                            for tweet in tweets:
+                                if len(collected_tweets) >= TWEETS_PER_RUN:
+                                    break
+                                if not any(word.lower() in tweet.text.lower() for word in IGNORE_LIST):
+                                    collected_tweets.append(tweet)
+                                    cprint(f"📝 Found tweet: {tweet.text[:100]}...", "cyan")
+                    except Exception as second_e:
+                        cprint(f"❌ Second attempt failed: {str(second_e)}", "red")
+                    return collected_tweets
+            except ImportError:
+                pass
+                
             cprint(f"❌ Error fetching tweets: {str(e)}", "red")
             time.sleep(randint(3, 7))
 
@@ -464,7 +496,7 @@ class SentimentAgent:
         
         # Initialize client if not already done
         if not self.client:
-            self.client = self.init_twitter_client()
+            self.client = await self.init_twitter_client()
         
         all_tweets = []
         for token in TOKENS_TO_TRACK:
@@ -489,8 +521,19 @@ class SentimentAgent:
         cprint("🌙 Moon Dev's Sentiment Analysis complete! 🚀", "green")
 
     def run(self):
-        """Main function to run sentiment analysis"""
-        asyncio.run(self.run_async())
+        """Main function to run sentiment analysis (Safe Loop handling)"""
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If we are in a running loop, we should probably be awaited 
+                # but to maintain compatibility we can't easily wait here.
+                # However, main.py now awaits run_async directly.
+                cprint("⚠️ SentimentAgent.run() called within running loop. Please use wait run_async().", "yellow")
+                # Fallback: run in a thread or just let main.py handle it via await run_async
+                return
+            loop.run_until_complete(self.run_async())
+        except RuntimeError:
+            asyncio.run(self.run_async())
 
 if __name__ == "__main__":
     try:
