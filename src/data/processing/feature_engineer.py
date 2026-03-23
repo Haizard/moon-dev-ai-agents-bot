@@ -6,11 +6,50 @@ Built with love by Moon Dev 🚀
 
 import pandas as pd
 import pandas_ta as ta
+from datetime import datetime
 from termcolor import colored, cprint
+
+from src.data.storage.mongo_db import MongoStorage
 
 class FeatureEngineer:
     def __init__(self):
+        self.storage = MongoStorage()
         cprint("[FEATURE ENGINE] Moon Dev's Feature Engineering Agent initialized", "white", "on_blue")
+
+    async def generate_features_from_db(self, symbol, lookback_trades=100):
+        """Fetch trades from DB and generate features"""
+        try:
+            await self.storage.connect()
+            collection = self.storage.db["trades"]
+            
+            # Fetch last N trades
+            cursor = collection.find({"symbol": symbol.upper()}).sort("timestamp", -1).limit(lookback_trades)
+            trades = await cursor.to_list(length=lookback_trades)
+            
+            if not trades:
+                return None
+                
+            # Convert to DataFrame style list for existing logic
+            trade_list = [t["data"] for t in trades]
+            
+            # 1. Calculate Microstructure
+            features = self.calculate_microstructure_features(trade_list)
+            
+            # 2. Add metadata
+            payload = {
+                "symbol": symbol.upper(),
+                "timestamp": datetime.utcnow(),
+                "features": features
+            }
+            
+            # 3. Save to features_dataset
+            await self.storage.save_to_collection("features_dataset", symbol, payload)
+            cprint(f"[FEATURE ENGINE] Persisted {len(features)} features for {symbol}", "white", "on_green")
+            
+            return features
+        except Exception as e:
+            cprint(f"[ERROR] generate_features_from_db failed: {str(e)}", "white", "on_red")
+            return None
 
     def calculate_basic_indicators(self, df):
         """Calculate standard technical indicators using pandas_ta"""

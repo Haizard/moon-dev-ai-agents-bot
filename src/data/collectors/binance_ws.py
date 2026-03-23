@@ -69,7 +69,7 @@ class BinanceWS:
             cprint(f"[*] {timestamp_str} | {side} {self.symbol.upper()} | {price} | Qty: {quantity}", "green" if side == "BUY" else "red")
             
             # 3. Save to MongoDB
-            await self.storage.save_market_data(self.symbol, "trade", cleaned_data)
+            await self.storage.save_to_collection("trades", self.symbol, cleaned_data)
         except Exception as e:
             cprint(f"[ERROR] Error in process_trade: {str(e)}", "white", "on_red")
 
@@ -77,7 +77,7 @@ class BinanceWS:
         """Process and store partial depth updates"""
         try:
             # Save raw depth data for order book reconstruction
-            await self.storage.save_market_data(self.symbol, "depth", data)
+            await self.storage.save_to_collection("orderbook_snapshots", self.symbol, data)
         except Exception as e:
             cprint(f"[ERROR] Error in process_depth: {str(e)}", "white", "on_red")
 

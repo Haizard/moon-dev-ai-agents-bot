@@ -18,12 +18,11 @@ class MarketReplay:
         cprint(f"[REPLAY] Moon Dev's Market Replay Engine initialized for {self.symbol.upper()} (Speed: {self.speed}x)", "white", "on_blue")
 
     async def start_replay(self, start_time, end_time=None):
-        """Replay market data from MongoDB between start_time and end_time"""
-        cprint(f"[REPLAY] Moon Dev's AI Agent starting replay from {start_time}...", "white", "on_blue")
+        """Replay market data from MongoDB specialized collections"""
+        cprint(f"[REPLAY] Moon Dev's AI Agent starting multi-source replay from {start_time}...", "white", "on_blue")
         
         try:
             await self.storage.connect()
-            collection = self.storage.db["market_data"]
             
             # Query criteria
             query = {
@@ -33,23 +32,45 @@ class MarketReplay:
             if end_time:
                 query["timestamp"]["$lte"] = end_time
                 
-            # Fetch cursor sorted by time
-            cursor = collection.find(query).sort("timestamp", 1)
+            # Create cursors for both sources
+            trade_cursor = self.storage.db["trades"].find(query).sort("timestamp", 1)
+            depth_cursor = self.storage.db["orderbook_snapshots"].find(query).sort("timestamp", 1)
+            
+            # Simple interleaving logic
+            next_trade = await trade_cursor.to_list(length=100)
+            next_depth = await depth_cursor.to_list(length=100)
             
             last_msg_time = None
             
-            async for doc in cursor:
+            while next_trade or next_depth:
+                # Determine which message comes first
+                t_time = next_trade[0]["timestamp"] if next_trade else datetime.max
+                d_time = next_depth[0]["timestamp"] if next_depth else datetime.max
+                
+                if t_time < d_time:
+                    doc = next_trade.pop(0)
+                    doc["type"] = "trade" # Inject type back for generic emitter
+                    if not next_trade:
+                        next_trade = await trade_cursor.to_list(length=100)
+                else:
+                    doc = next_depth.pop(0)
+                    doc["type"] = "depth"
+                    if not next_depth:
+                        next_depth = await depth_cursor.to_list(length=100)
+                
                 current_msg_time = doc["timestamp"]
                 
                 # Simulate time delay
                 if last_msg_time:
                     delay = (current_msg_time - last_msg_time).total_seconds() / self.speed
-                    if delay > 0:
+                    if delay > 0 and delay < 10: # Cap delay to prevent long stalls
                         await asyncio.sleep(delay)
                 
-                # Emit data (as if it were a WebSocket message)
+                # Emit data
                 self.emit_data(doc)
                 last_msg_time = current_msg_time
+                
+            cprint("[REPLAY] Multi-source replay completed!", "white", "on_green")
                 
             cprint("[REPLAY] Replay completed!", "white", "on_green")
             

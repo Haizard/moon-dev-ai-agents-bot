@@ -9,16 +9,16 @@ import schedule
 import time
 from termcolor import colored, cprint
 from src.data.collectors.binance_ws import BinanceWS
+from src.data.collectors.birdeye_collector import BirdEyeCollector
 from src.data.collectors.coingecko import CoinGeckoCollector
-from src.data.collectors.yahoo_finance import YahooFinanceCollector
-from src.data.collectors.alpha_vantage import AlphaVantageCollector
-from src.data.collectors.fred import FREDCollector
-from src.data.collectors.cftc import CFTCCollector
-from src.data.collectors.reddit import RedditCollector
+from src.data.processing.feature_engineer import FeatureEngineer
+# ... (rest of imports)
 
 class CollectorOrchestrator:
     def __init__(self):
         self.binance_ws = BinanceWS()
+        self.birdeye = BirdEyeCollector()
+        self.feature_engine = FeatureEngineer()
         self.coingecko = CoinGeckoCollector()
         self.yahoo = YahooFinanceCollector()
         self.alpha_vantage = AlphaVantageCollector()
@@ -64,7 +64,12 @@ class CollectorOrchestrator:
             # Commodities
             await self.yahoo.get_historical_data(ticker="GC=F")  # Gold
             
-            cprint("[SUCCESS] Macro tasks completed. Sleeping for 1 hour...", "green")
+            # 6. Feature Engineering (Every 1 hour)
+            from src.config import MONITORED_TOKENS
+            for token in MONITORED_TOKENS:
+                await self.feature_engine.generate_features_from_db(token)
+
+            cprint("[SUCCESS] Macro tasks and feature engineering completed. Sleeping for 1 hour...", "green")
             await asyncio.sleep(3600) # Sleep for 1 hour
 
     async def start(self):
@@ -75,6 +80,7 @@ class CollectorOrchestrator:
         try:
             await asyncio.gather(
                 self.binance_ws.start(),
+                self.birdeye.start(),
                 self.run_macro_tasks()
             )
         except Exception as e:
