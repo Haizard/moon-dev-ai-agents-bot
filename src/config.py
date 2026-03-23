@@ -78,7 +78,7 @@ DATA_TIMEFRAME = '1H'  # 1m, 3m, 5m, 15m, 30m, 1H, 2H, 4H, 6H, 8H, 12H, 1D, 3D, 
 SAVE_OHLCV_DATA = False  # 🌙 Set to True to save data permanently, False will only use temp data during run
 
 # AI Model Settings 🤖
-AI_MODEL = "claude-3-haiku-20240307"  # Model Options:
+AI_MODEL = "gemini-2.0-flash"  # Model Options:
                                      # - claude-3-haiku-20240307 (Fast, efficient Claude model)
                                      # - claude-3-sonnet-20240229 (Balanced Claude model)
                                      # - claude-3-opus-20240229 (Most powerful Claude model)
@@ -102,3 +102,4 @@ EXIT_ALL_POSITIONS = False
 DO_NOT_TRADE_LIST = ['777']
 CLOSED_POSITIONS_TXT = '777'
 minimum_trades_in_last_hour = 777
+MIN_TRADES_LAST_HOUR = 50

@@ -47,6 +47,9 @@ class BinanceWS:
                         await self.process_trade(data)
                     elif event_type == "depthUpdate":
                         await self.process_depth(data)
+                elif "bids" in data or "asks" in data or "b" in data or "a" in data:
+                    # Partial depth stream doesn't have an "e" field
+                    await self.process_depth(data)
                 
                 self.queue.task_done()
             except Exception as e:

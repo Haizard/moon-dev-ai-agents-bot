@@ -57,13 +57,30 @@ from src.config import *
 from src.agents.base_agent import BaseAgent
 import traceback
 
+# ✨ Data infrastructure integration
+try:
+    from src.data.storage.mongo_db import MongoStorage
+    from src.models.prediction_engine import PredictionEngine
+    MONGO_PREDICTION_AVAILABLE = True
+except Exception:
+    MONGO_PREDICTION_AVAILABLE = False
+
 # Load environment variables
 load_dotenv()
 
 class RiskAgent(BaseAgent):
     def __init__(self):
         """Initialize Moon Dev's Risk Agent 🛡️"""
-        super().__init__('risk')  # Initialize base agent with type
+        super().__init__('risk')
+        
+        # ✨ Data infrastructure
+        if MONGO_PREDICTION_AVAILABLE:
+            self.mongo   = MongoStorage()
+            self.predictor = PredictionEngine()
+            cprint("[RISK] ✨ MongoDB + PredictionEngine connected", "white", "on_green")
+        else:
+            self.mongo     = None
+            self.predictor = None
         
         # Set AI parameters - use config values unless overridden
         self.ai_model = AI_MODEL if AI_MODEL else config.AI_MODEL
@@ -214,21 +231,66 @@ class RiskAgent(BaseAgent):
             traceback.print_exc()  # Print full stack trace
 
     def get_position_data(self, token):
-        """Get recent market data for a token"""
+        """Get recent market data for a token — from MongoDB first, fallback to API."""
+        result = {}
+
+        # 1. Legacy OHLCV from on-chain (kept as fallback)
         try:
-            # Get 8h of 15m data
-            data_15m = n.get_data(token, 0.33, '15m')  # 8 hours = 0.33 days
-            
-            # Get 2h of 5m data
-            data_5m = n.get_data(token, 0.083, '5m')   # 2 hours = 0.083 days
-            
-            return {
-                '15m': data_15m.to_dict() if data_15m is not None else None,
-                '5m': data_5m.to_dict() if data_5m is not None else None
-            }
+            data_15m = n.get_data(token, 0.33, '15m')
+            data_5m  = n.get_data(token, 0.083, '5m')
+            result['15m'] = data_15m.to_dict() if data_15m is not None else None
+            result['5m']  = data_5m.to_dict()  if data_5m  is not None else None
         except Exception as e:
-            cprint(f"❌ Error getting data for {token}: {str(e)}", "white", "on_red")
-            return None
+            cprint(f"[RISK] OHLCV fallback failed for {token}: {str(e)}", "yellow")
+
+        # 2. ✨ MongoDB features_dataset — autonomous Binance-derived metrics
+        if self.mongo and self.predictor:
+            try:
+                import asyncio
+                loop = asyncio.new_event_loop()
+
+                async def _fetch():
+                    await self.mongo.connect()
+                    # Latest feature doc for this token (use Binance symbol if available)
+                    binance_sym = "BTCUSDT"  # Default; extend with a lookup map as needed
+                    doc = await self.mongo.db["features_dataset"].find_one(
+                        {"symbol": binance_sym},
+                        sort=[("_id", -1)]
+                    )
+                    pred = await self.predictor.get_prediction(binance_sym)
+                    return doc, pred
+
+                doc, pred = loop.run_until_complete(_fetch())
+                loop.close()
+
+                if doc:
+                    auto = doc.get("data", {}).get("autonomous", {})
+                    micro = doc.get("data", {}).get("microstructure", {})
+                    result["autonomous_metrics"] = {
+                        "volume_spike":    auto.get("volume_spike", 1.0),
+                        "momentum_5m_pct": auto.get("momentum_5m_pct", 0.0),
+                        "buy_pressure":    auto.get("buy_pressure", 0.5),
+                        "sell_pressure":   auto.get("sell_pressure", 0.5),
+                        "volatility_20":   auto.get("volatility_20", 0.0),
+                        "vol_imbalance":   micro.get("volume_imbalance", 0.0),
+                    }
+
+                if pred:
+                    result["prediction_signal"] = {
+                        "signal":     pred.get("signal", "HOLD"),
+                        "score":      pred.get("score", 0),
+                        "confidence": pred.get("confidence", 0.5),
+                        "reasons":    pred.get("reasons", []),
+                    }
+                    cprint(
+                        f"[RISK] ✨ {token[:8]} prediction: {pred.get('signal')} "
+                        f"(conf={pred.get('confidence', 0):.0%})",
+                        "white", "on_green"
+                    )
+            except Exception as e:
+                cprint(f"[RISK] MongoDB/Prediction fetch failed: {str(e)}", "yellow")
+
+        return result if result else None
 
     def should_override_limit(self, limit_type):
         """Ask AI if we should override the limit based on recent market data"""

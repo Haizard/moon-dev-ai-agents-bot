@@ -72,6 +72,13 @@ from src.config import *
 from src import nice_funcs as n
 from src.data.ohlcv_collector import collect_all_tokens
 
+# ✨ PredictionEngine v2 — autonomous multi-factor signals
+try:
+    from src.models.prediction_engine import PredictionEngine
+    PREDICTION_AVAILABLE = True
+except Exception:
+    PREDICTION_AVAILABLE = False
+
 # Load environment variables
 load_dotenv()
 
@@ -79,26 +86,42 @@ class TradingAgent:
     def __init__(self):
         self.client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_KEY"))
         self.recommendations_df = pd.DataFrame(columns=['token', 'action', 'confidence', 'reasoning'])
+        self.prediction_engine = PredictionEngine() if PREDICTION_AVAILABLE else None
         print("🤖 Moon Dev's LLM Trading Agent initialized!")
 
     def analyze_market_data(self, token, market_data):
-        """Analyze market data using Claude"""
+        """Analyze market data using Claude, enriched by PredictionEngine v2 signals."""
         try:
             # Skip analysis for excluded tokens
             if token in EXCLUDED_TOKENS:
                 print(f"⚠️ Skipping analysis for excluded token: {token}")
                 return None
-            
+
+            # ── Prediction Signal Context ─────────────────────────────────────
+            prediction_ctx = ""
+            if 'prediction_signal' in market_data:
+                sig = market_data['prediction_signal']
+                prediction_ctx = f"""
+🤖 PredictionEngine v2 Signal (Binance-derived, no API cost):
+  Signal:     {sig.get('signal', 'N/A')}
+  Score:      {sig.get('score', 0):+d} / 5
+  Confidence: {sig.get('confidence', 0):.0%}
+  Reasons:    {', '.join(sig.get('reasons', []))}
+  Factors:    RSI={sig.get('factors', {}).get('rsi', 50):.1f} | Vol Spike={sig.get('factors', {}).get('volume_spike', 1):.1f}x | Buy={sig.get('factors', {}).get('buy_pressure', 0.5):.0%}
+
+Consider this signal alongside your technical analysis, especially the buy pressure and volume trends.
+"""
+            else:
+                prediction_ctx = "No PredictionEngine signal available."
+
             # Prepare strategy context
-            strategy_context = ""
+            strategy_context = prediction_ctx
             if 'strategy_signals' in market_data:
-                strategy_context = f"""
-Strategy Signals Available:
+                strategy_context += f"""
+
+Additional Strategy Signals:
 {json.dumps(market_data['strategy_signals'], indent=2)}
                 """
-            else:
-                strategy_context = "No strategy signals available."
-            
             message = self.client.messages.create(
                 model=AI_MODEL,
                 max_tokens=AI_MAX_TOKENS,
@@ -392,7 +415,29 @@ Example format:
             # Analyze each token's data
             for token, data in market_data.items():
                 cprint(f"\n🤖 AI Agent Analyzing Token: {token}", "white", "on_green")
-                
+
+                # ✨ Inject PredictionEngine v2 signal
+                if self.prediction_engine:
+                    try:
+                        import asyncio
+                        loop = asyncio.new_event_loop()
+                        pred = loop.run_until_complete(self.prediction_engine.get_prediction(token))
+                        loop.close()
+                        data['prediction_signal'] = pred
+
+                        # Hard gate: skip LLM if confident SELL signal
+                        if pred.get('signal') in ('SELL', 'STRONG_SELL') and pred.get('confidence', 0) >= 0.75:
+                            cprint(f"🚫 PredictionEngine SELL gate triggered for {token} — skipping LLM", "white", "on_red")
+                            self.recommendations_df = pd.concat([
+                                self.recommendations_df,
+                                pd.DataFrame([{'token': token, 'action': 'SELL',
+                                               'confidence': int(pred['confidence'] * 100),
+                                               'reasoning': f"PredictionEngine: {pred.get('reasons')}"}])
+                            ], ignore_index=True)
+                            continue  # Skip LLM call
+                    except Exception as pe:
+                        cprint(f"[PREDICTION] Warning: {str(pe)}", "yellow")
+
                 # Include strategy signals in analysis if available
                 if strategy_signals and token in strategy_signals:
                     cprint(f"📊 Including {len(strategy_signals[token])} strategy signals in analysis", "cyan")

@@ -32,25 +32,23 @@ Remember: Past performance doesn't guarantee future results!
 # Model Configuration
 # Each agent can use a different model type and name
 RESEARCH_CONFIG = {
-    "type": "groq",
-    "name": "mixtral-8x7b-32768"  # Fast reasoning model for research
+    "type": "gemini",
+    "name": "gemini-2.0-flash"  # Using Gemini 2.0 Flash as requested
 }
 
 BACKTEST_CONFIG = {
-    "type": "openai",
-    "name": "o3-mini",             # More capable model for complex backtest creation
-    "reasoning_effort": "high"      # Maximum reasoning for O3 models
+    "type": "gemini",
+    "name": "gemini-2.0-flash"  # Using Gemini 2.0 Flash as requested
 }
 
 DEBUG_CONFIG = {
-    "type": "openai",
-    "name": "o3-mini",             # Technical debugging with reasoning capabilities
-    "reasoning_effort": "high"      # Maximum reasoning for O3 models
+    "type": "gemini",
+    "name": "gemini-2.0-flash"  # Using Gemini 2.0 Flash as requested
 }
 
 PACKAGE_CONFIG = {
-    "type": "groq",
-    "name": "mixtral-8x7b-32768"  # Fast model for package optimization
+    "type": "gemini",
+    "name": "gemini-2.0-flash"  # Using Gemini 2.0 Flash as requested
 }
 
 # DeepSeek Model Selection per Agent
@@ -273,8 +271,8 @@ FINAL_BACKTEST_DIR = DATA_DIR / "backtests_final"
 CHARTS_DIR = DATA_DIR / "charts"  # New directory for HTML charts
 
 # Create main directories if they don't exist
-for dir in [DATA_DIR, RESEARCH_DIR, BACKTEST_DIR, PACKAGE_DIR, FINAL_BACKTEST_DIR, CHARTS_DIR]:
-    dir.mkdir(parents=True, exist_ok=True)
+for d in [DATA_DIR, RESEARCH_DIR, BACKTEST_DIR, PACKAGE_DIR, FINAL_BACKTEST_DIR, CHARTS_DIR]:
+    d.mkdir(parents=True, exist_ok=True)
 
 print(f"📂 Using RBI data directory: {DATA_DIR}")
 print(f"📂 Research directory: {RESEARCH_DIR}")

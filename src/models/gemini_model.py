@@ -11,8 +11,9 @@ class GeminiModel(BaseModel):
     """Implementation for Google's Gemini models"""
     
     AVAILABLE_MODELS = {
-        "gemini-pro": "Most capable Gemini model",
-        "gemini-pro-vision": "Gemini model with vision capabilities"
+        "gemini-2.0-flash": "Latest Gemini 2.0 Flash model",
+        "gemini-pro-latest": "Latest Gemini Pro model",
+        "gemini-pro": "Standard Gemini Pro model"
     }
     
     def __init__(self, api_key: str, model_name: str = "gemini-pro", **kwargs):

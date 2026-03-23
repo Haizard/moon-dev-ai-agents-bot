@@ -15,6 +15,13 @@ from src import nice_funcs as n
 from src.agents.research_agent import ResearchAgent
 import asyncio
 
+# ✨ PredictionEngine v2 — autonomous multi-factor signals
+try:
+    from src.models.prediction_engine import PredictionEngine
+    PREDICTION_AVAILABLE = True
+except Exception:
+    PREDICTION_AVAILABLE = False
+
 # 🎯 Strategy Evaluation Prompt
 STRATEGY_EVAL_PROMPT = """
 You are Moon Dev's Advanced Strategy Analyst 🌙
@@ -57,6 +64,9 @@ class StrategyAgent:
         self.enabled_strategies = []
         self.client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_KEY"))
         self.research_agent = ResearchAgent()
+        self.predictor = PredictionEngine() if PREDICTION_AVAILABLE else None
+        if self.predictor:
+            cprint("[STRATEGY] ✨ PredictionEngine v2 connected", "white", "on_green")
         
         if ENABLE_STRATEGIES:
             try:
@@ -169,9 +179,24 @@ class StrategyAgent:
                 research_report = {}
 
             market_data = {
-                "ohlcv": ohlcv_data,
+                "ohlcv":           ohlcv_data,
                 "research_report": research_report
             }
+
+            # C. ✨ PredictionEngine v2 signal — autonomous Binance-derived context
+            if self.predictor:
+                try:
+                    pred = await self.predictor.get_prediction(token)
+                    if pred:
+                        market_data["prediction_signal"] = pred
+                        cprint(
+                            f"[STRATEGY] ✨ Prediction for {token}: "
+                            f"{pred.get('signal')} (conf={pred.get('confidence', 0):.0%}) "
+                            f"score={pred.get('score', 0):+d}",
+                            "white", "on_green"
+                        )
+                except Exception as pe:
+                    cprint(f"[STRATEGY] Prediction fetch failed: {str(pe)}", "yellow")
             
             # 3. Have LLM evaluate the signals
             print("\n🤖 Getting LLM evaluation of signals...")
