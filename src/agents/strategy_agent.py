@@ -7,10 +7,11 @@ from src.config import *
 import json
 from termcolor import cprint
 import anthropic
+import time
 import os
 import importlib
 import inspect
-import time
+import pkgutil
 from src import nice_funcs as n
 from src.agents.research_agent import ResearchAgent
 import asyncio
@@ -70,22 +71,32 @@ class StrategyAgent:
         
         if ENABLE_STRATEGIES:
             try:
-                # Import strategies directly
-                from src.strategies.custom.example_strategy import ExampleStrategy
-                from src.strategies.custom.private_my_strategy import MyStrategy
+                # Dynamically load strategies from the custom folder
+                custom_strategies_path = os.path.join(PROJECT_ROOT, "strategies", "custom")
                 
-                # Initialize strategies
-                self.enabled_strategies.extend([
-                    ExampleStrategy(),
-                    MyStrategy()
-                ])
+                print(f"🔍 Scanning for strategies in: {custom_strategies_path}")
                 
-                print(f"✅ Loaded {len(self.enabled_strategies)} strategies!")
-                for strategy in self.enabled_strategies:
-                    print(f"  • {strategy.name}")
+                for loader, module_name, is_pkg in pkgutil.iter_modules([custom_strategies_path]):
+                    if module_name == "__init__":
+                        continue
+                        
+                    try:
+                        # Import the module
+                        module = importlib.import_module(f"src.strategies.custom.{module_name}")
+                        
+                        # Find all classes that inherit from BaseStrategy
+                        for name, obj in inspect.getmembers(module):
+                            if inspect.isclass(obj) and issubclass(obj, BaseStrategy) and obj is not BaseStrategy:
+                                self.enabled_strategies.append(obj())
+                                print(f"  ✅ Loaded strategy: {name} from {module_name}")
+                    except Exception as mod_e:
+                        print(f"  ❌ Error loading module {module_name}: {mod_e}")
+                
+                if not self.enabled_strategies:
+                    print("⚠️ No custom strategies found in src/strategies/custom/")
                     
             except Exception as e:
-                print(f"⚠️ Error loading strategies: {e}")
+                print(f"⚠️ Error in dynamic strategy loading: {e}")
         else:
             print("🤖 Strategy Agent is disabled in config.py")
         

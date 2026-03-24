@@ -1,3 +1,2 @@
-Simple Mean Reversion Strategy: Buy when price is 2 standard deviations below the 20-period SMA on 15m timeframe, sell when it returns to the SMA.
-# https://www.youtube.com/watch?v=eK2yatANcNU
-# https://www.youtube.com/watch?v=lxg-6QdBI6k
+# Moon Dev's Trading Ideas 🌙
+RSI Mean Reversion Strategy: Buy when RSI(14) is below 30 and sell when RSI(14) is above 70. Use a 15-minute timeframe on BTC-USD.
